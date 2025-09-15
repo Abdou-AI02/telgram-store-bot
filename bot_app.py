@@ -138,14 +138,17 @@ async def create_sample_products():
 
 async def create_user_if_not_exists(user_id: int, first_name: str, referred_by_id: int = None):
     async with pool.acquire() as conn:
-        user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id=$1", user_id)
-        if not user:
-            ref_code = secrets.token_hex(4)
-            role = 'owner' if user_id in ADMINS else 'user'
-            await conn.execute(
-                "INSERT INTO users (user_id, first_name, ref_code, referred_by, role) VALUES ($1, $2, $3, $4, $5)", 
-                user_id, first_name, ref_code, referred_by_id, role
-            )
+        # Use ON CONFLICT to handle race conditions
+        ref_code = secrets.token_hex(4)
+        role = 'owner' if user_id in ADMINS else 'user'
+        
+        status = await conn.execute(
+            "INSERT INTO users (user_id, first_name, ref_code, referred_by, role) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (user_id) DO NOTHING", 
+            user_id, first_name, ref_code, referred_by_id, role
+        )
+        
+        # Check if the insert was successful (i.e., not a conflict)
+        if status == 'INSERT 0 1':
             if referred_by_id:
                 await conn.execute(
                     "UPDATE users SET referrals = referrals + 1, points = points + $1 WHERE user_id = $2", 
