@@ -27,7 +27,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").replace('،', ',').split(',') if x]
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "YOUR_TELEGRAM_USERNAME")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@host:port/database") # New config
+DATABASE_URL = os.getenv("DATABASE_URL") # New config, removed default value
 DEFAULT_CURRENCY = "USD"
 DZD_TO_USD_RATE = 250
 POINTS_PER_DOLLAR = 1000
@@ -2024,7 +2024,7 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
     await update_payment_status(order['order_id'], "completed")
     
     # -- تعديل: إضافة نقاط الإحالة عند الشراء اليدوي
-    user_data = await get_user_data(order['user_id'])
+    user_data = await get_user_by_id(order['user_id'])
     if user_data and user_data['referred_by']:
         referrer_id = user_data['referred_by']
         await add_points(referrer_id, REFERRAL_PURCHASE_BONUS_POINTS)
