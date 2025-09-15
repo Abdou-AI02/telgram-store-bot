@@ -1112,8 +1112,16 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
             )
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on purchase: {e}")
+    
+    # إرسال الفاتورة مع رقم الطلب
+    invoice_text = (
+        f"✅ **تم الدفع بنجاح!**\n\n"
+        f"• تم خصم <b>{points_cost}</b> نقطة من حسابك.\n"
+        f"• رقم طلبك: <code>{order_id}</code>\n\n"
+        f"يمكنك استخدام هذا الرقم للاستفسار عن طلبك."
+    )
+    await callback.message.edit_text(invoice_text, parse_mode="HTML")
 
-    await callback.message.edit_text(f"✅ تم الدفع بنجاح! تم خصم <b>{points_cost}</b> نقطة من حسابك.", parse_mode="HTML")
     await callback.answer("تم إتمام عملية الدفع.", show_alert=True)
     
 @router.callback_query(F.data == "contact_admin_payment")
@@ -1132,7 +1140,8 @@ async def contact_admin_payment(callback: types.CallbackQuery):
         f"لإتمام عملية الشراء، يرجى التواصل مع المسؤول وإرسال الرمز التالي:\n\n"
         f"رمز الدفع: <code>{payment_code}</code>\n"
         f"اسم المسؤول: @{ADMIN_USERNAME}\n\n"
-        f"بعد الدفع، قم بإرسال هذا الرمز للمسؤول لتأكيد طلبك."
+        f"بعد الدفع، قم بإرسال هذا الرمز للمسؤول لتأكيد طلبك.\n\n"
+        f"رقم طلبك: <code>{order_id}</code>"
     )
     
     await callback.message.edit_text(text, parse_mode="HTML")
@@ -1707,7 +1716,8 @@ async def process_order_action(callback: types.CallbackQuery, bot: Bot):
                                                parse_mode="HTML")
             
             invoice_text += f"\n• الإجمالي: <b>{order['total']:.2f} {DEFAULT_CURRENCY}</b> ({order['total'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n"
-            invoice_text += f"• رمز الفاتورة: <code>{order_id}</code>"
+            invoice_text += f"• رقم طلبك: <code>{order_id}</code>\n\n"
+            invoice_text += "يمكنك استخدام هذا الرقم للاستفسار عن طلبك."
             
             await bot.send_message(order['user_id'], invoice_text, parse_mode="HTML")
             await callback.message.edit_text(f"✅ تم قبول الطلب #{order_id} بنجاح.")
@@ -2038,6 +2048,14 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
             )
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on manual purchase: {e}")
+    
+    # إرسال الفاتورة مع رقم الطلب
+    invoice_text = (
+        f"✅ **تم تأكيد دفعك!**\n\n"
+        f"• رقم طلبك: <code>{order['order_id']}</code>\n\n"
+        f"يمكنك استخدام هذا الرقم للاستفسار عن طلبك."
+    )
+    await bot.send_message(order['user_id'], invoice_text, parse_mode="HTML")
 
     await message.answer(f"✅ تم تأكيد الدفع للطلب #{order['order_id']} بنجاح.", reply_markup=admin_panel_kb)
     await state.clear()
