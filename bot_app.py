@@ -577,7 +577,7 @@ admin_panel_kb = ReplyKeyboardMarkup(
 
 owner_panel_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="👑 لوحة المشرف"), Keyboard(text="⚙️ إدارة الصلاحيات"), KeyboardButton(text="🔍 تفاصيل طلب")],
+        [KeyboardButton(text="👑 لوحة المشرف"), KeyboardButton(text="⚙️ إدارة الصلاحيات"), KeyboardButton(text="🔍 تفاصيل طلب")],
         [KeyboardButton(text="✨ إضافة منتج بالذكاء الاصطناعي"), KeyboardButton(text="📢 إرسال إشعار"), KeyboardButton(text="🛍️ إدارة المتجر")],
         [KeyboardButton(text="🚹 تجربة كـ مستخدم"), KeyboardButton(text="🔙 العودة للقائمة الرئيسية")]
     ],
