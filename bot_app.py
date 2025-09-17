@@ -1061,9 +1061,12 @@ async def show_payment_options(callback: types.CallbackQuery, state: FSMContext)
     
     if user_points >= points_cost:
         kb.inline_keyboard.append([InlineKeyboardButton(text=f"✅ ادفع بـ {points_cost} نقطة", callback_data="pay_with_points")])
-
-    kb.inline_keyboard.append([InlineKeyboardButton(text="💬 تواصل مع المسؤول", callback_data="contact_admin_payment")])
-
+    
+    # إضافة طرق الدفع المتاحة
+    payment_methods = await list_payment_methods_db()
+    if payment_methods:
+        kb.inline_keyboard.append([InlineKeyboardButton(text="💬 تواصل مع المسؤول", callback_data="contact_admin_payment")])
+        
     await callback.message.edit_text("اختر طريقة الدفع:", reply_markup=kb)
     
 @router.callback_query(F.data == "pay_with_points")
@@ -1095,7 +1098,10 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
     for item in items:
         product = await get_product_by_id(item['product_id'])
         if product['file_url']:
-            await callback.message.answer(f"📦 المنتج: **{product['name']}**\n\nرابط التحميل: {product['file_url']}", parse_mode="Markdown")
+            if product['file_url'].startswith('http'):
+                await callback.message.answer(f"📦 المنتج: **{product['name']}**\n\nرابط التحميل: {product['file_url']}", parse_mode="Markdown")
+            else:
+                await callback.message.answer_document(product['file_url'], caption=f"📦 المنتج: **{product['name']}**", parse_mode="Markdown")
 
     await clear_cart(user_id)
 
@@ -1132,17 +1138,24 @@ async def contact_admin_payment(callback: types.CallbackQuery):
         await callback.answer("⚠️ سلتك فارغة.", show_alert=True)
         return
     
+    payment_methods = await list_payment_methods_db()
+    if not payment_methods:
+        await callback.message.answer("⚠️ لا توجد طرق دفع متاحة حالياً. يرجى التواصل مع المسؤول مباشرة.")
+        return
+        
     payment_code = secrets.token_hex(8)
     order_id = await create_order(user_id, "Admin", payment_code)
     
     text = (
-        f"💬 **التواصل مع المسؤول**\n\n"
-        f"لإتمام عملية الشراء، يرجى التواصل مع المسؤول وإرسال الرمز التالي:\n\n"
+        f"💬 **التواصل مع المسؤول لإتمام الدفع**\n\n"
+        f"رقم طلبك: <code>{order_id}</code>\n"
         f"رمز الدفع: <code>{payment_code}</code>\n"
         f"اسم المسؤول: @{ADMIN_USERNAME}\n\n"
-        f"بعد الدفع، قم بإرسال هذا الرمز للمسؤول لتأكيد طلبك.\n\n"
-        f"رقم طلبك: <code>{order_id}</code>"
+        f"يرجى استخدام إحدى طرق الدفع التالية وإرسال رمز الدفع للمسؤول:\n"
     )
+    
+    for method in payment_methods:
+        text += f"\n**{method['name']}**\n{method['details']}\n"
     
     await callback.message.edit_text(text, parse_mode="HTML")
     await clear_cart(user_id)
@@ -1492,13 +1505,14 @@ async def process_edit_product_id(message: types.Message, state: FSMContext):
         product = await get_product_by_id(pid)
         if not product:
             await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
         await state.update_data(product_id=pid)
         await message.answer(f"أرسل الاسم الجديد للمنتج <code>{product['name']}</code>:", parse_mode="HTML")
         await state.set_state(EditProductState.name)
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 @router.message(EditProductState.name)
 async def process_edit_product_name(message: types.Message, state: FSMContext):
@@ -1566,6 +1580,7 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
     
 @router.message(F.text == "📜 عرض المنتجات")
 async def list_products_admin_handler(message: types.Message):
@@ -1712,11 +1727,17 @@ async def process_order_action(callback: types.CallbackQuery, bot: Bot):
                 product = await get_product_by_id(item['product_id'])
                 if product:
                     invoice_text += f"- {product['name']} (الكمية: {item['quantity']})\n"
-                    # Send download link if available
+                    # Send download link or file
                     if product['file_url']:
-                        await bot.send_message(order['user_id'], 
-                                               f"📦 رابط منتجك <b>{product['name']}</b>:\n{product['file_url']}", 
-                                               parse_mode="HTML")
+                        if product['file_url'].startswith('http'):
+                            await bot.send_message(order['user_id'], 
+                                                   f"📦 رابط منتجك <b>{product['name']}</b>:\n{product['file_url']}", 
+                                                   parse_mode="HTML")
+                        else:
+                            await bot.send_document(order['user_id'], 
+                                                    document=product['file_url'], 
+                                                    caption=f"📦 المنتج: <b>{product['name']}</b>", 
+                                                    parse_mode="HTML")
             
             invoice_text += f"\n• الإجمالي: <b>{order['total']:.2f} {DEFAULT_CURRENCY}</b> ({order['total'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n"
             invoice_text += f"• رقم طلبك: <code>{order_id}</code>\n\n"
@@ -1750,7 +1771,7 @@ async def process_view_order_details(message: types.Message, state: FSMContext):
         order = await get_order_by_id(order_id)
         if not order:
             await message.answer("⚠️ لم يتم العثور على الطلب. يرجى إدخال رقم صحيح.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
 
         items = await get_order_items(order_id)
@@ -1778,6 +1799,7 @@ async def process_view_order_details(message: types.Message, state: FSMContext):
         
     except ValueError:
         await message.answer("⚠️ رقم الطلب يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
     except Exception as e:
         logger.error(f"Error viewing order details: {e}")
         await message.answer("⚠️ حدث خطأ أثناء جلب تفاصيل الطلب.")
@@ -1853,13 +1875,14 @@ async def process_add_points_user_id(message: types.Message, state: FSMContext):
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer("⚠️ لم يتم العثور على المستخدم. أرسل رقماً صحيحاً.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
         await state.update_data(user_id=user_id)
         await message.answer("أرسل عدد النقاط التي تود إضافتها:")
         await state.set_state(AddPointsState.points)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 @router.message(AddPointsState.points)
 async def process_add_points(message: types.Message, state: FSMContext):
@@ -1888,13 +1911,14 @@ async def process_deduct_points_user_id(message: types.Message, state: FSMContex
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer("⚠️ لم يتم العثور على المستخدم. أرسل رقماً صحيحاً.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
         await state.update_data(user_id=user_id)
         await message.answer("أرسل عدد النقاط التي تود خصمها:")
         await state.set_state(DeductPointsState.points)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 @router.message(DeductPointsState.points)
 async def process_deduct_points(message: types.Message, state: FSMContext):
@@ -1923,7 +1947,7 @@ async def process_get_user_info_id(message: types.Message, state: FSMContext):
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer(f"⚠️ لم يتم العثور على المستخدم #{user_id}.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
         text = (
             f"👤 **بيانات المستخدم #{user_id}**\n\n"
@@ -1936,6 +1960,7 @@ async def process_get_user_info_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 # ====== Payment Methods Management ======
 @router.message(F.text == "💰 طرق الدفع")
@@ -1989,6 +2014,7 @@ async def process_delete_payment_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم طريقة الدفع يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 @router.message(F.text == "📜 عرض طرق الدفع")
 async def list_payments_admin_handler(message: types.Message):
@@ -2035,10 +2061,16 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
     for item in order_items:
         product = await get_product_by_id(item['product_id'])
         if product and product['file_url']:
-            await bot.send_message(order['user_id'], 
-                                 f"✅ تم تأكيد دفعك! إليك رابط منتجك <b>{product['name']}</b>:\n{product['file_url']}", 
-                                 parse_mode="HTML")
-
+            if product['file_url'].startswith('http'):
+                await bot.send_message(order['user_id'], 
+                                   f"✅ تم تأكيد دفعك! إليك رابط منتجك <b>{product['name']}</b>:\n{product['file_url']}", 
+                                   parse_mode="HTML")
+            else:
+                await bot.send_document(order['user_id'], 
+                                    document=product['file_url'], 
+                                    caption=f"✅ تم تأكيد دفعك! إليك ملف منتجك <b>{product['name']}</b>", 
+                                    parse_mode="HTML")
+            
     await update_order_status(order['order_id'], "مقبول ✅")
     await update_payment_status(order['order_id'], "completed")
     
@@ -2113,6 +2145,7 @@ async def process_manage_roles_user_id(message: types.Message, state: FSMContext
         await state.set_state(ManageRolesState.role)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await state.clear() # Fix: Clear state on invalid input
 
 @router.callback_query(F.data.startswith("set_role:"), ManageRolesState.role)
 async def process_manage_roles_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -2232,4 +2265,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}") 
