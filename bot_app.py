@@ -1492,6 +1492,7 @@ async def process_edit_product_id(message: types.Message, state: FSMContext):
         product = await get_product_by_id(pid)
         if not product:
             await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
+            await state.clear() # Fix: Clear state on invalid input
             return
         await state.update_data(product_id=pid)
         await message.answer(f"أرسل الاسم الجديد للمنتج <code>{product['name']}</code>:", parse_mode="HTML")
@@ -1557,6 +1558,7 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         product = await get_product_by_id(pid)
         if not product:
             await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
+            await state.clear() # Fix: Clear state on invalid input
             return
         await delete_product_db(pid)
         await message.answer(f"✅ تم حذف المنتج <b>{product['name']}</b> بنجاح.", 
@@ -1564,7 +1566,7 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-
+    
 @router.message(F.text == "📜 عرض المنتجات")
 async def list_products_admin_handler(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1634,6 +1636,7 @@ async def process_delete_coupon_code(message: types.Message, state: FSMContext):
     coupon = await get_coupon_db(code)
     if not coupon:
         await message.answer("⚠️ لم يتم العثور على الكوبون. أرسل رمزاً صحيحاً.")
+        await state.clear() # Fix: Clear state on invalid input
         return
     await delete_coupon_db(code)
     await message.answer(f"✅ تم حذف الكوبون <b>{code}</b> بنجاح.", 
@@ -1747,6 +1750,7 @@ async def process_view_order_details(message: types.Message, state: FSMContext):
         order = await get_order_by_id(order_id)
         if not order:
             await message.answer("⚠️ لم يتم العثور على الطلب. يرجى إدخال رقم صحيح.")
+            await state.clear() # Fix: Clear state on invalid input
             return
 
         items = await get_order_items(order_id)
@@ -1849,6 +1853,7 @@ async def process_add_points_user_id(message: types.Message, state: FSMContext):
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer("⚠️ لم يتم العثور على المستخدم. أرسل رقماً صحيحاً.")
+            await state.clear() # Fix: Clear state on invalid input
             return
         await state.update_data(user_id=user_id)
         await message.answer("أرسل عدد النقاط التي تود إضافتها:")
@@ -1883,6 +1888,7 @@ async def process_deduct_points_user_id(message: types.Message, state: FSMContex
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer("⚠️ لم يتم العثور على المستخدم. أرسل رقماً صحيحاً.")
+            await state.clear() # Fix: Clear state on invalid input
             return
         await state.update_data(user_id=user_id)
         await message.answer("أرسل عدد النقاط التي تود خصمها:")
@@ -1917,7 +1923,7 @@ async def process_get_user_info_id(message: types.Message, state: FSMContext):
         user = await get_user_by_id(user_id)
         if not user:
             await message.answer(f"⚠️ لم يتم العثور على المستخدم #{user_id}.")
-            await state.clear()
+            await state.clear() # Fix: Clear state on invalid input
             return
         text = (
             f"👤 **بيانات المستخدم #{user_id}**\n\n"
