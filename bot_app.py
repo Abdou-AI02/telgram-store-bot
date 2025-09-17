@@ -7,7 +7,7 @@ import sys
 import secrets
 import json
 import aiohttp
-import asyncpg  # New import for PostgreSQL
+import asyncpg
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -27,17 +27,15 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMINS = [int(x) for x in os.getenv("ADMINS", "").replace('،', ',').split(',') if x]
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "YOUR_TELEGRAM_USERNAME")
-DATABASE_URL = os.getenv("DATABASE_URL") # New config, removed default value
+DATABASE_URL = os.getenv("DATABASE_URL")
 DEFAULT_CURRENCY = "USD"
 DZD_TO_USD_RATE = 250
 POINTS_PER_DOLLAR = 1000
 REFERRAL_BONUS_POINTS = 100
 REFEREE_BONUS_POINTS = 50
-# -- تعديل: مكافأة شراء ثابتة للمحيل
 REFERRAL_PURCHASE_BONUS_POINTS = 100
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Connection pool for PostgreSQL
 pool = None
 
 # ====== Database Functions ======
@@ -65,7 +63,8 @@ async def init_db():
                 stock INTEGER DEFAULT 0, 
                 category TEXT, 
                 description TEXT, 
-                file_url TEXT
+                file_url TEXT,
+                parent_category TEXT DEFAULT NULL
             );
             CREATE TABLE IF NOT EXISTS cart (
                 id SERIAL PRIMARY KEY, 
@@ -138,7 +137,6 @@ async def create_sample_products():
 
 async def create_user_if_not_exists(user_id: int, first_name: str, referred_by_id: int = None):
     async with pool.acquire() as conn:
-        # Use ON CONFLICT to handle race conditions
         ref_code = secrets.token_hex(4)
         role = 'owner' if user_id in ADMINS else 'user'
         
@@ -147,7 +145,6 @@ async def create_user_if_not_exists(user_id: int, first_name: str, referred_by_i
             user_id, first_name, ref_code, referred_by_id, role
         )
         
-        # Check if the insert was successful (i.e., not a conflict)
         if status == 'INSERT 0 1':
             if referred_by_id:
                 await conn.execute(
@@ -206,6 +203,17 @@ async def add_to_cart(user_id, product_id, quantity=1):
             await conn.execute("UPDATE cart SET quantity=$1 WHERE id=$2", cart_item['quantity'] + quantity, cart_item['id'])
         else:
             await conn.execute("INSERT INTO cart (user_id, product_id, quantity) VALUES ($1, $2, $3)", user_id, product_id, quantity)
+
+
+async def remove_from_cart(user_id, product_id, quantity=1):
+    async with pool.acquire() as conn:
+        cart_item = await conn.fetchrow("SELECT id, quantity FROM cart WHERE user_id=$1 AND product_id=$2", user_id, product_id)
+        if cart_item:
+            new_quantity = cart_item['quantity'] - quantity
+            if new_quantity > 0:
+                await conn.execute("UPDATE cart SET quantity=$1 WHERE id=$2", new_quantity, cart_item['id'])
+            else:
+                await conn.execute("DELETE FROM cart WHERE id=$1", cart_item['id'])
 
 
 async def get_cart_items(user_id):
@@ -675,7 +683,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
         
     user_role = user_data['role']
 
-    # New functionality: Switch between user and admin view
     if text == "🚹 تجربة كـ مستخدم":
         await cmd_start_as_user(message, state)
         return
@@ -683,7 +690,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
         await cmd_start_as_admin(message, state)
         return
     
-    # الأوامر الرئيسية
     if text == "🛒 المتجر":
         await cmd_shop(message)
     elif text == "📄 طلباتي":
@@ -703,11 +709,9 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "🔍 تفاصيل طلب" and user_role in ['admin', 'owner']:
         await start_view_order_details(message, state)
     
-    # إدارة المتجر (أزرار)
     elif text == "🛍️ إدارة المتجر" and user_role in ['admin', 'owner']:
         await manage_store_panel(message)
     
-    # إدارة المنتجات
     elif text == "📦 إدارة المنتجات" and user_role in ['admin', 'owner']:
         await manage_products_panel(message)
     elif text == "➕ إضافة منتج" and user_role in ['admin', 'owner']:
@@ -719,7 +723,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "📜 عرض المنتجات" and user_role in ['admin', 'owner']:
         await list_products_admin_handler(message)
     
-    # إدارة الكوبونات
     elif text == "🏷️ إدارة الكوبونات" and user_role in ['admin', 'owner']:
         await manage_coupons_panel(message)
     elif text == "➕ إضافة كوبون" and user_role in ['admin', 'owner']:
@@ -729,7 +732,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "📜 عرض الكوبونات" and user_role in ['admin', 'owner']:
         await list_coupons_admin_handler(message)
     
-    # إدارة المستخدمين
     elif text == "👤 إدارة المستخدمين" and user_role in ['admin', 'owner']:
         await manage_users_panel(message)
     elif text == "➕ إضافة نقاط" and user_role in ['admin', 'owner']:
@@ -739,7 +741,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "🔍 عرض بيانات مستخدم" and user_role in ['admin', 'owner']:
         await start_get_user_info(message, state)
     
-    # إدارة طرق الدفع
     elif text == "💰 طرق الدفع" and user_role in ['admin', 'owner']:
         await manage_payments_panel(message)
     elif text == "➕ إضافة طريقة دفع" and user_role in ['admin', 'owner']:
@@ -753,13 +754,11 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "📢 إرسال إشعار" and user_role in ['admin', 'owner']:
         await start_notify_users(message, state)
     
-    # الإحصائيات وإدارة الطلبات
     elif text == "📊 الإحصائيات" and user_role in ['admin', 'owner']:
         await get_stats_panel(message)
     elif text == "📝 إدارة الطلبات" and user_role in ['admin', 'owner']:
         await manage_orders_panel(message)
     
-    # العودة للقائمة الرئيسية
     elif text == "🔙 العودة للقائمة الرئيسية":
         await back_to_main_menu(message, state)
 
@@ -768,7 +767,6 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     
-    # Handle referral link
     args = message.text.split()
     referred_by_id = None
     if len(args) > 1 and args[1].startswith('ref_'):
@@ -794,7 +792,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
     user_data = await get_user_data(message.from_user.id)
 
-    # Check for temporary user view state
     user_view_state = (await state.get_data()).get('user_view', False)
     if user_view_state:
         await message.answer(f"مرحباً بك في وضع المستخدم، {message.from_user.full_name}!", reply_markup=main_kb_user)
@@ -808,7 +805,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await message.answer(f"مرحباً بك في بوت المتجر، {message.from_user.full_name}!", reply_markup=main_kb_user)
 
 
-# New: Toggle to user view
 @router.message(F.text == "🚹 تجربة كـ مستخدم")
 async def cmd_start_as_user(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -816,14 +812,13 @@ async def cmd_start_as_user(message: types.Message, state: FSMContext):
         await message.answer("🚫 ليس لديك صلاحيات.")
         return
 
-    await state.set_state(None) # Clear state to avoid FSM conflicts
+    await state.set_state(None)
     await state.update_data(user_view=True)
     await message.answer("تم التبديل إلى وضع المستخدم العادي.", reply_markup=main_kb_user)
 
-# New: Toggle back to admin view
 @router.message(F.text == "🔙 العودة كـ مسؤول")
 async def cmd_start_as_admin(message: types.Message, state: FSMContext):
-    await state.set_state(None) # Clear state to avoid FSM conflicts
+    await state.set_state(None)
     await state.update_data(user_view=False)
     user_data = await get_user_data(message.from_user.id)
     if user_data['role'] == 'owner':
@@ -854,7 +849,6 @@ async def cmd_my_account(message: types.Message):
 async def cmd_daily_tasks(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
     
-    # Check if a day has passed since the last task
     last_daily_task_str = user_data.get('last_daily_task')
     if last_daily_task_str:
         last_daily_task_date = datetime.fromisoformat(last_daily_task_str)
@@ -862,13 +856,11 @@ async def cmd_daily_tasks(message: types.Message):
             await message.answer("لقد أكملت مهام اليوم بالفعل. عد غداً!")
             return
 
-    # Task: visit the shop and earn 10 points
     await add_points(message.from_user.id, 10)
     await update_last_daily_task(message.from_user.id)
     
     await message.answer("🎉 لقد أكملت مهمة اليوم وحصلت على 10 نقاط إضافية!")
     
-# ====== تعديل: نظام المتجر المتداخل ======
 async def show_categories(message_or_callback, is_edit=False):
     """دالة مساعدة لعرض فئات المتجر الرئيسية."""
     categories = await get_all_categories()
@@ -881,10 +873,8 @@ async def show_categories(message_or_callback, is_edit=False):
         kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
 
     if is_edit:
-        # إذا كان استدعاء من زر
         await message_or_callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     else:
-        # إذا كان استدعاء من رسالة نصية
         await message_or_callback.answer(text, reply_markup=kb, parse_mode="HTML")
 
 @router.message(F.text == "🛒 المتجر")
@@ -943,8 +933,6 @@ async def show_product_details(callback: types.CallbackQuery):
 
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
-# ====== نهاية تعديل المتجر ======
-
 
 @router.callback_query(F.data.startswith("add_to_cart:"))
 async def add_to_cart_callback(callback: types.CallbackQuery):
@@ -967,7 +955,7 @@ async def buy_now_callback(callback: types.CallbackQuery, state: FSMContext):
             return
 
         user_id = callback.from_user.id
-        await clear_cart(user_id) # Clear cart before buying now
+        await clear_cart(user_id)
         await add_to_cart(user_id, product_id, quantity=1)
         await show_payment_options(callback, state)
             
@@ -987,10 +975,16 @@ async def cmd_cart(message: types.Message, state: FSMContext):
         await message.answer("سلة التسوق فارغة 🛒")
         return
     
-    text = "<b>سلتك:</b>\n"
-    total_price = sum(item['price'] * item['quantity'] for item in items)
+    text = "<b>سلتك:</b>\n\n"
+    total_price = 0
+    kb_buttons = []
+
+    for item in items:
+        total_price += item['price'] * item['quantity']
+        text += f"• {item['name']} - الكمية: {item['quantity']} - السعر: {item['price']:.2f} {DEFAULT_CURRENCY}\n"
+        kb_buttons.append([InlineKeyboardButton(text=f"➖ {item['name']}", callback_data=f"remove_from_cart:{item['product_id']}")])
+
     
-    # تطبيق الخصم إذا كان هناك كوبون
     state_data = await state.get_data()
     coupon_discount = state_data.get('coupon_discount', 0)
     if coupon_discount > 0:
@@ -1003,13 +997,21 @@ async def cmd_cart(message: types.Message, state: FSMContext):
     
     text += f"\nالمجموع: {total_price:.2f} {DEFAULT_CURRENCY} ({total_price * DZD_TO_USD_RATE:.2f} دينار جزائري) أو <b>{points_cost}</b> نقطة\n\n"
     
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ الدفع", callback_data="pay_options"),
-         InlineKeyboardButton(text="🗑️ إفراغ السلة", callback_data="clear_cart")],
-        [InlineKeyboardButton(text="🎁 استخدام كوبون", callback_data="apply_coupon")]
-    ])
+    kb_buttons.append([InlineKeyboardButton(text="✅ الدفع", callback_data="pay_options")])
+    kb_buttons.append([InlineKeyboardButton(text="🗑️ إفراغ السلة", callback_data="clear_cart")])
+    kb_buttons.append([InlineKeyboardButton(text="🎁 استخدام كوبون", callback_data="apply_coupon")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("remove_from_cart:"))
+async def remove_from_cart_callback(callback: types.CallbackQuery, state: FSMContext):
+    product_id = int(callback.data.split(":")[1])
+    await remove_from_cart(callback.from_user.id, product_id)
+    await callback.answer("تم إزالة المنتج من السلة.", show_alert=True)
+    await cmd_cart(callback.message, state)
+
 
 @router.callback_query(F.data == "apply_coupon")
 async def apply_coupon_handler(callback: types.CallbackQuery, state: FSMContext):
@@ -1028,7 +1030,7 @@ async def process_coupon_code_from_user(message: types.Message, state: FSMContex
     else:
         await message.answer("❌ الكوبون غير صالح أو منتهي.")
     
-    await state.set_state(None) # Clear state after applying coupon
+    await state.set_state(None)
     await cmd_cart(message, state)
 
 
@@ -1047,7 +1049,6 @@ async def show_payment_options(callback: types.CallbackQuery, state: FSMContext)
         
     total_price = sum(item["price"] * item["quantity"] for item in items)
     
-    # تطبيق الخصم إذا كان هناك كوبون
     state_data = await state.get_data()
     coupon_discount = state_data.get('coupon_discount', 0)
     if coupon_discount > 0:
@@ -1062,7 +1063,6 @@ async def show_payment_options(callback: types.CallbackQuery, state: FSMContext)
     if user_points >= points_cost:
         kb.inline_keyboard.append([InlineKeyboardButton(text=f"✅ ادفع بـ {points_cost} نقطة", callback_data="pay_with_points")])
     
-    # إضافة طرق الدفع المتاحة
     payment_methods = await list_payment_methods_db()
     if payment_methods:
         kb.inline_keyboard.append([InlineKeyboardButton(text="💬 تواصل مع المسؤول", callback_data="contact_admin_payment")])
@@ -1079,7 +1079,6 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
 
     total_price = sum(item["price"] * item["quantity"] for item in items)
     
-    # تطبيق الخصم إذا كان هناك كوبون
     state_data = await state.get_data()
     coupon_discount = state_data.get('coupon_discount', 0)
     if coupon_discount > 0:
@@ -1105,10 +1104,8 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
 
     await clear_cart(user_id)
 
-    # إضافة نقاط إحالة عند الشراء
     if user_data['referred_by']:
         referrer_id = user_data['referred_by']
-        # -- تعديل: استخدام المكافأة الثابتة
         purchase_points = REFERRAL_PURCHASE_BONUS_POINTS
         await add_points(referrer_id, purchase_points)
         try:
@@ -1119,7 +1116,6 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on purchase: {e}")
     
-    # إرسال الفاتورة مع رقم الطلب
     invoice_text = (
         f"✅ **تم الدفع بنجاح!**\n\n"
         f"• تم خصم <b>{points_cost}</b> نقطة من حسابك.\n"
@@ -1184,7 +1180,6 @@ async def admin_panel(message: types.Message):
     
     await message.answer("اختر من لوحة تحكم المشرف:", reply_markup=admin_panel_kb)
 
-# New: Manage Store Panel
 @router.message(F.text == "🛍️ إدارة المتجر")
 async def manage_store_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1206,13 +1201,11 @@ async def start_add_category(message: types.Message, state: FSMContext):
 @router.message(ManageStoreState.category_name, F.text != "📝 تعديل فئة")
 async def process_add_category_name(message: types.Message, state: FSMContext):
     category_name = message.text
-    # Check if category already exists
     products = await list_products(category_name)
     if products:
         await message.answer(f"⚠️ الفئة '{category_name}' موجودة بالفعل. يرجى اختيار اسم آخر.")
         return
     
-    # Create a dummy product to add the category
     await add_product_db(name=f"منتج وهمي للفئة {category_name}", price=0, stock=0, category=category_name, description="منتج وهمي لإنشاء الفئة", file_url="")
     await message.answer(f"✅ تم إضافة الفئة '{category_name}' بنجاح.", reply_markup=manage_store_kb)
     await state.clear()
@@ -1242,7 +1235,7 @@ async def process_edit_category_name(message: types.Message, state: FSMContext):
 async def process_new_category_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     old_name = data.get('old_category_name')
-    if not old_name: # This state is also used by add/delete, so check
+    if not old_name:
         return
     new_name = message.text
     
@@ -1276,7 +1269,6 @@ async def process_delete_category(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# ====== Product Management FSM ======
 @router.message(F.text == "📦 إدارة المنتجات")
 async def manage_products_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1286,7 +1278,6 @@ async def manage_products_panel(message: types.Message):
     
     await message.answer("اختر إجراءً لإدارة المنتجات:", reply_markup=manage_products_kb)
 
-# ====== Product Management FSM ======
 @router.message(F.text == "➕ إضافة منتج")
 async def start_add_product(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1317,13 +1308,36 @@ async def process_product_stock(message: types.Message, state: FSMContext):
     try:
         stock = int(message.text)
         await state.update_data(stock=stock)
-        await message.answer("أرسل تصنيف المنتج (مثلاً: دورة، خدمة، أخرى):")
-        await state.set_state(AddProductState.category)
+        categories = await get_all_categories()
+        kb_buttons = [[InlineKeyboardButton(text=cat, callback_data=f"add_product_category:{cat}")] for cat in categories]
+        if categories:
+            kb_buttons.append([InlineKeyboardButton(text="➕ إضافة فئة جديدة", callback_data="add_new_category")])
+            kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+            await message.answer("اختر فئة المنتج:", reply_markup=kb)
+            await state.set_state(AddProductState.category)
+        else:
+            await message.answer("لا توجد فئات حالياً. أرسل اسم فئة جديدة.")
+            await state.set_state(AddProductState.category)
+
     except ValueError:
         await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى.")
 
+@router.callback_query(F.data.startswith("add_product_category:"), AddProductState.category)
+async def set_product_category_from_callback(callback: types.CallbackQuery, state: FSMContext):
+    category = callback.data.split(":")[1]
+    await state.update_data(category=category)
+    await callback.message.edit_text(f"✅ تم اختيار الفئة: <b>{category}</b>\n\nأرسل وصف المنتج:", parse_mode="HTML")
+    await state.set_state(AddProductState.description)
+    await callback.answer()
+
+@router.callback_query(F.data == "add_new_category", AddProductState.category)
+async def add_new_category_from_product(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.edit_text("أرسل اسم الفئة الجديدة:")
+    await state.set_state(AddProductState.category)
+    await callback.answer()
+
 @router.message(AddProductState.category)
-async def process_product_category(message: types.Message, state: FSMContext):
+async def process_product_category_text(message: types.Message, state: FSMContext):
     await state.update_data(category=message.text)
     await message.answer("أرسل وصف المنتج:")
     await state.set_state(AddProductState.description)
@@ -1351,7 +1365,6 @@ async def process_product_file(message: types.Message, state: FSMContext):
                         reply_markup=manage_products_kb, parse_mode="HTML")
     await state.clear()
 
-# ====== AI Product Addition FSM ======
 @router.message(F.text == "✨ إضافة منتج بالذكاء الاصطناعي")
 async def start_add_product_ai(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1372,10 +1385,8 @@ async def process_product_text_ai(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # حفظ البيانات المستخرجة في حالة FSM
     await state.update_data(**product_data)
 
-    # عرض البيانات للمسؤول للتأكيد أو التعديل
     text = (
         "✅ تم استخراج البيانات التالية. هل ترغب في تأكيدها أو تعديلها؟\n\n"
         f"• **الاسم**: {product_data.get('name', 'غير متوفر')}\n"
@@ -1488,7 +1499,6 @@ async def cancel_add_product_ai(callback: types.CallbackQuery, state: FSMContext
     await callback.message.edit_text("تم إلغاء عملية إضافة المنتج.", reply_markup=None)
     await callback.answer()
 
-# ====== Edit Product FSM ======
 @router.message(F.text == "📝 تعديل منتج")
 async def start_edit_product(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1512,7 +1522,7 @@ async def process_edit_product_id(message: types.Message, state: FSMContext):
         await state.set_state(EditProductState.name)
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
 @router.message(EditProductState.name)
 async def process_edit_product_name(message: types.Message, state: FSMContext):
@@ -1555,7 +1565,6 @@ async def process_edit_product_description(message: types.Message, state: FSMCon
     await message.answer(f"✅ تم تعديل المنتج #{user_data['product_id']} بنجاح.", reply_markup=manage_products_kb)
     await state.clear()
 
-# ====== Delete Product FSM ======
 @router.message(F.text == "🗑️ حذف منتج")
 async def start_delete_product(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1572,7 +1581,7 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         product = await get_product_by_id(pid)
         if not product:
             await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
-            await state.clear() # Fix: Clear state on invalid input
+            await state.clear()
             return
         await delete_product_db(pid)
         await message.answer(f"✅ تم حذف المنتج <b>{product['name']}</b> بنجاح.", 
@@ -1580,7 +1589,7 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
     
 @router.message(F.text == "📜 عرض المنتجات")
 async def list_products_admin_handler(message: types.Message):
@@ -1597,7 +1606,6 @@ async def list_products_admin_handler(message: types.Message):
         text += f"- <code>#{p['product_id']}</code>: <b>{p['name']}</b>\n  السعر: {p['price']:.2f} {DEFAULT_CURRENCY} ({p['price'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n  المخزون: {p['stock']}\n  التصنيف: {p['category']}\n"
     await message.answer(text, parse_mode="HTML")
 
-# ====== Coupons Management ======
 @router.message(F.text == "🏷️ إدارة الكوبونات")
 async def manage_coupons_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1651,7 +1659,7 @@ async def process_delete_coupon_code(message: types.Message, state: FSMContext):
     coupon = await get_coupon_db(code)
     if not coupon:
         await message.answer("⚠️ لم يتم العثور على الكوبون. أرسل رمزاً صحيحاً.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
         return
     await delete_coupon_db(code)
     await message.answer(f"✅ تم حذف الكوبون <b>{code}</b> بنجاح.", 
@@ -1675,7 +1683,6 @@ async def list_coupons_admin_handler(message: types.Message):
         text += f"- <code>{c['code']}</code>: خصم {c['discount']:.0f}%\n"
     await message.answer(text, parse_mode="HTML")
 
-# ====== Orders Management ======
 @router.message(F.text == "📝 إدارة الطلبات")
 async def manage_orders_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1713,11 +1720,9 @@ async def process_order_action(callback: types.CallbackQuery, bot: Bot):
 
         await update_order_status(int(order_id), status)
         
-        # إرسال المنتجات والفاتورة للمستخدم عند القبول
         if action == "accept":
             order_items = await get_order_items(int(order_id))
             
-            # Prepare invoice
             invoice_text = (
                 f"✅ **تم تأكيد طلبك رقم {order_id}**\n\n"
                 f"إليك المنتجات التي قمت بشرائها:\n"
@@ -1727,7 +1732,6 @@ async def process_order_action(callback: types.CallbackQuery, bot: Bot):
                 product = await get_product_by_id(item['product_id'])
                 if product:
                     invoice_text += f"- {product['name']} (الكمية: {item['quantity']})\n"
-                    # Send download link or file
                     if product['file_url']:
                         if product['file_url'].startswith('http'):
                             await bot.send_message(order['user_id'], 
@@ -1754,7 +1758,6 @@ async def process_order_action(callback: types.CallbackQuery, bot: Bot):
         logger.error(f"Order update error: {e}")
         await callback.answer("⚠️ تعذر تحديث الطلب.", show_alert=True)
 
-# New: View Order Details
 @router.message(F.text == "🔍 تفاصيل طلب")
 async def start_view_order_details(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1799,13 +1802,11 @@ async def process_view_order_details(message: types.Message, state: FSMContext):
         
     except ValueError:
         await message.answer("⚠️ رقم الطلب يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
     except Exception as e:
         logger.error(f"Error viewing order details: {e}")
         await message.answer("⚠️ حدث خطأ أثناء جلب تفاصيل الطلب.")
 
-
-# ====== Statistics ======
 @router.message(F.text == "📊 الإحصائيات")
 async def get_stats_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1823,7 +1824,6 @@ async def get_stats_panel(message: types.Message):
     text += f"• إجمالي المبيعات: <b>{total_sales:.2f} {DEFAULT_CURRENCY}</b> ({total_sales * DZD_TO_USD_RATE:.2f} دينار جزائري)\n"
     text += f"• إجمالي عدد الطلبات: <b>{total_orders}</b>\n\n"
     
-    # Popular Products
     text += "🏆 **المنتجات الأكثر مبيعاً:**\n"
     if most_popular_products:
         for p in most_popular_products:
@@ -1831,7 +1831,6 @@ async def get_stats_panel(message: types.Message):
     else:
         text += "لا توجد بيانات.\n"
     
-    # Active Users
     text += "\n👥 **المستخدمون الأكثر نشاطاً (حسب الطلبات):**\n"
     if most_active_users:
         for u in most_active_users:
@@ -1839,7 +1838,6 @@ async def get_stats_panel(message: types.Message):
     else:
         text += "لا توجد بيانات.\n"
         
-    # Referral Sources
     text += "\n🔗 **مصادر الإحالة الأكثر فاعلية:**\n"
     if referral_sources:
         for r in referral_sources:
@@ -1849,7 +1847,6 @@ async def get_stats_panel(message: types.Message):
     
     await message.answer(text, parse_mode="HTML")
 
-# ====== Users Management ======
 @router.message(F.text == "👤 إدارة المستخدمين")
 async def manage_users_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1882,7 +1879,7 @@ async def process_add_points_user_id(message: types.Message, state: FSMContext):
         await state.set_state(AddPointsState.points)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
 @router.message(AddPointsState.points)
 async def process_add_points(message: types.Message, state: FSMContext):
@@ -1918,7 +1915,7 @@ async def process_deduct_points_user_id(message: types.Message, state: FSMContex
         await state.set_state(DeductPointsState.points)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
 @router.message(DeductPointsState.points)
 async def process_deduct_points(message: types.Message, state: FSMContext):
@@ -1960,9 +1957,8 @@ async def process_get_user_info_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
-# ====== Payment Methods Management ======
 @router.message(F.text == "💰 طرق الدفع")
 async def manage_payments_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -2014,7 +2010,7 @@ async def process_delete_payment_id(message: types.Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("⚠️ رقم طريقة الدفع يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
 @router.message(F.text == "📜 عرض طرق الدفع")
 async def list_payments_admin_handler(message: types.Message):
@@ -2074,7 +2070,6 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
     await update_order_status(order['order_id'], "مقبول ✅")
     await update_payment_status(order['order_id'], "completed")
     
-    # -- تعديل: إضافة نقاط الإحالة عند الشراء اليدوي
     user_data = await get_user_by_id(order['user_id'])
     if user_data and user_data['referred_by']:
         referrer_id = user_data['referred_by']
@@ -2087,7 +2082,6 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on manual purchase: {e}")
     
-    # إرسال الفاتورة مع رقم الطلب
     invoice_text = (
         f"✅ **تم تأكيد دفعك!**\n\n"
         f"• رقم طلبك: <code>{order['order_id']}</code>\n\n"
@@ -2098,8 +2092,6 @@ async def process_verify_payment_code(message: types.Message, state: FSMContext,
     await message.answer(f"✅ تم تأكيد الدفع للطلب #{order['order_id']} بنجاح.", reply_markup=admin_panel_kb)
     await state.clear()
 
-
-# ====== Back to Main Menu ======
 @router.message(F.text == "🔙 العودة للقائمة الرئيسية")
 async def back_to_main_menu(message: types.Message, state: FSMContext):
     await state.clear()
@@ -2112,7 +2104,6 @@ async def back_to_main_menu(message: types.Message, state: FSMContext):
     else:
         await message.answer(f"مرحباً بك في بوت المتجر، {message.from_user.full_name}!", reply_markup=main_kb_user)
 
-# ====== Owner-only Role Management ======
 @router.message(F.text == "⚙️ إدارة الصلاحيات")
 async def manage_roles_panel(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -2145,7 +2136,7 @@ async def process_manage_roles_user_id(message: types.Message, state: FSMContext
         await state.set_state(ManageRolesState.role)
     except ValueError:
         await message.answer("⚠️ رقم المستخدم يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
-        await state.clear() # Fix: Clear state on invalid input
+        await state.clear()
 
 @router.callback_query(F.data.startswith("set_role:"), ManageRolesState.role)
 async def process_manage_roles_callback(callback: types.CallbackQuery, state: FSMContext):
@@ -2168,7 +2159,6 @@ async def process_manage_roles_callback(callback: types.CallbackQuery, state: FS
     await callback.message.edit_text(f"✅ تم تعيين صلاحية المستخدم <b>{user_to_update['first_name']}</b> إلى <b>{new_role}</b> بنجاح.", parse_mode="HTML")
     await state.clear()
 
-# ====== Notification System ======
 @router.message(F.text == "📢 إرسال إشعار")
 async def start_notify_users(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -2200,7 +2190,7 @@ async def process_notification_message(message: types.Message, state: FSMContext
     async with pool.acquire() as conn:
         if target == 'all':
             users_to_notify = await conn.fetch("SELECT user_id FROM users")
-        else: # group - send to users who interacted recently
+        else:
             users_to_notify = await conn.fetch("SELECT user_id FROM users ORDER BY created_at DESC LIMIT 10")
         
     for user in users_to_notify:
@@ -2212,8 +2202,6 @@ async def process_notification_message(message: types.Message, state: FSMContext
     await message.answer("✅ تم إرسال الإشعار بنجاح.", reply_markup=admin_panel_kb)
     await state.clear()
 
-
-# ====== Commands ======
 @router.message(Command("coupon"))
 async def cmd_coupon(message: types.Message, state: FSMContext):
     await state.clear()
@@ -2233,7 +2221,43 @@ async def cmd_coupon(message: types.Message, state: FSMContext):
         logger.error(f"Coupon error: {e}")
         await message.answer("⚠️ حدث خطأ أثناء تطبيق الكوبون.")
 
-# ====== Main Function =====
+# Scheduler for automated tasks
+async def auto_notifications(bot: Bot):
+    while True:
+        now = datetime.now()
+        # Weekly sales report on Sunday
+        if now.weekday() == 6 and now.hour == 10 and now.minute == 0:
+            total_sales = await get_total_sales_db()
+            total_orders = await get_total_orders_db()
+            most_popular_products = await get_most_popular_products()
+            
+            report_text = (
+                f"📊 **تقرير المبيعات الأسبوعي**\n\n"
+                f"• إجمالي المبيعات: <b>{total_sales:.2f} {DEFAULT_CURRENCY}</b>\n"
+                f"• إجمالي عدد الطلبات: <b>{total_orders}</b>\n\n"
+                f"🏆 **المنتجات الأكثر مبيعاً هذا الأسبوع:**\n"
+            )
+            for p in most_popular_products:
+                report_text += f"- {p['name']}: {p['total_sold']} مرة\n"
+            
+            for admin_id in ADMINS:
+                try:
+                    await bot.send_message(admin_id, report_text, parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"Failed to send weekly report to admin {admin_id}: {e}")
+        
+        # Low stock notification
+        products = await list_products()
+        for p in products:
+            if p['stock'] <= 50 and p['stock'] > 0:
+                for admin_id in ADMINS:
+                    try:
+                        await bot.send_message(admin_id, f"⚠️ **تنبيه انخفاض المخزون:**\n\nالمنتج <b>{p['name']}</b> يتبقى منه {p['stock']} قطعة فقط!", parse_mode="HTML")
+                    except Exception as e:
+                        logger.error(f"Failed to send low stock alert to admin {admin_id}: {e}")
+        
+        await asyncio.sleep(3600) # Check every hour
+
 async def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN not found in .env file.")
@@ -2241,7 +2265,6 @@ async def main():
     
     await init_db()
     
-    # تأكد من أن المستخدمين في قائمة المسؤولين لديهم دور 'owner'
     if ADMINS:
         async with pool.acquire() as conn:
             for admin_id in ADMINS:
@@ -2251,6 +2274,9 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     
+    # Start the background task for automated notifications
+    asyncio.create_task(auto_notifications(bot))
+
     logger.info("Starting bot...")
     try:
         await dp.start_polling(bot)
@@ -2265,4 +2291,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped manually.")
     except Exception as e:
-        logger.error(f"An error occurred: {e}") 
+        logger.error(f"An error occurred: {e}")
