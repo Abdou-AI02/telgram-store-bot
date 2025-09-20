@@ -691,6 +691,11 @@ manage_store_kb = ReplyKeyboardMarkup(
     input_field_placeholder="اختر أمراً..."
 )
 
+skip_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="تخطي")]], 
+    resize_keyboard=True
+)
+
 notify_users_kb = InlineKeyboardMarkup(
     inline_keyboard=[
         [InlineKeyboardButton(text="إلى كل المستخدمين", callback_data="notify_all")],
@@ -1177,7 +1182,7 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
         try:
             await Bot.get_current().send_message(
                 referrer_id,
-                f"🎉 تهانينا! الشخص الذي قمت بإحالته قام بالشراء، وحصلت على {purchase_points} نقطة إضافية."
+                f"🎉 تهانينا! الشخص الذي قمت بإhalته قام بالشراء، وحصلت على {purchase_points} نقطة إضافية."
             )
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on purchase: {e}")
@@ -1543,8 +1548,12 @@ async def process_edit_product_id(message: types.Message, state: FSMContext):
             await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
             await state.clear()
             return
-        await state.update_data(product_id=pid)
-        await message.answer(f"أرسل الاسم الجديد للمنتج <code>{product['name']}</code>:", parse_mode="HTML")
+        await state.update_data(product_id=pid, product=dict(product))
+        await message.answer(
+            f"أرسل الاسم الجديد للمنتج أو اضغط على تخطي.\nالاسم الحالي: <code>{product['name']}</code>",
+            parse_mode="HTML",
+            reply_markup=skip_kb
+        )
         await state.set_state(EditProductState.name)
     except ValueError:
         await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
@@ -1552,62 +1561,113 @@ async def process_edit_product_id(message: types.Message, state: FSMContext):
 
 @router.message(EditProductState.name)
 async def process_edit_product_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("أرسل السعر الجديد للمنتج:")
+    if message.text != "تخطي":
+        await state.update_data(name=message.text)
+    
+    data = await state.get_data()
+    product = data['product']
+    await message.answer(
+        f"أرسل السعر الجديد للمنتج أو اضغط على تخطي.\nالسعر الحالي: <code>{product['price']}</code>",
+        parse_mode="HTML",
+        reply_markup=skip_kb
+    )
     await state.set_state(EditProductState.price)
 
 @router.message(EditProductState.price)
 async def process_edit_product_price(message: types.Message, state: FSMContext):
-    try:
-        price = float(message.text)
-        await state.update_data(price=price)
-        await message.answer("أرسل الكمية الجديدة المتوفرة:")
-        await state.set_state(EditProductState.stock)
-    except ValueError:
-        await message.answer("⚠️ السعر يجب أن يكون رقماً. أرسل السعر مرة أخرى.")
+    if message.text != "تخطي":
+        try:
+            price = float(message.text)
+            await state.update_data(price=price)
+        except ValueError:
+            await message.answer("⚠️ السعر يجب أن يكون رقماً. أرسل السعر مرة أخرى أو تخطى.", reply_markup=skip_kb)
+            return
+
+    data = await state.get_data()
+    product = data['product']
+    await message.answer(
+        f"أرسل الكمية الجديدة المتوفرة أو اضغط على تخطي.\nالكمية الحالية: <code>{product['stock']}</code>",
+        parse_mode="HTML",
+        reply_markup=skip_kb
+    )
+    await state.set_state(EditProductState.stock)
 
 @router.message(EditProductState.stock)
 async def process_edit_product_stock(message: types.Message, state: FSMContext):
-    try:
-        stock = int(message.text)
-        await state.update_data(stock=stock)
-        await message.answer("أرسل وصف المنتج الجديد:")
-        await state.set_state(EditProductState.description)
-    except ValueError:
-        await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى.")
+    if message.text != "تخطي":
+        try:
+            stock = int(message.text)
+            await state.update_data(stock=stock)
+        except ValueError:
+            await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى أو تخطى.", reply_markup=skip_kb)
+            return
+
+    data = await state.get_data()
+    product = data['product']
+    await message.answer(
+        f"أرسل وصف المنتج الجديد أو اضغط على تخطي.\nالوصف الحالي: <blockquote>{product['description']}</blockquote>",
+        parse_mode="HTML",
+        reply_markup=skip_kb
+    )
+    await state.set_state(EditProductState.description)
 
 @router.message(EditProductState.description)
 async def process_edit_product_description(message: types.Message, state: FSMContext):
-    await state.update_data(description=message.text)
-    # Start category selection for editing
+    if message.text != "تخطي":
+        await state.update_data(description=message.text)
+    
     top_categories = await get_subcategories(None)
     kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in top_categories]
+    kb_buttons.append([InlineKeyboardButton(text="⏭️ تخطي (إبقاء الفئة الحالية)", callback_data="final_cat_edit:skip")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-    await message.answer("اختر الفئة الجديدة للمنتج (المستوى 1):", reply_markup=kb)
+    await message.answer("اختر الفئة الجديدة للمنتج، أو تخطى:", reply_markup=kb)
     await state.set_state(EditProductState.category_id)
 
 @router.callback_query(F.data.startswith("select_cat_edit:"), EditProductState.category_id)
 async def process_edit_product_category_selection(callback: types.CallbackQuery, state: FSMContext):
     category_id = int(callback.data.split(":", 1)[1])
     subcategories = await get_subcategories(category_id)
+    kb_buttons = []
     if subcategories:
-        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in subcategories]
-        kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_edit:{category_id}")])
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-        await callback.message.edit_text("اختر فئة فرعية، أو قم بتأكيد الفئة الحالية:", reply_markup=kb)
-    else:
-        await process_final_edit_category_selection(callback, state)
+        kb_buttons.extend([[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in subcategories])
+    
+    kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_edit:{category_id}")])
+    kb_buttons.append([InlineKeyboardButton(text="⏭️ تخطي (إبقاء الفئة الحالية)", callback_data=f"final_cat_edit:skip")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    await callback.message.edit_text("اختر فئة فرعية، قم بتأكيد الفئة الحالية، أو تخطى:", reply_markup=kb)
     await callback.answer()
 
 @router.callback_query(F.data.startswith("final_cat_edit:"), EditProductState.category_id)
 async def process_final_edit_category_selection(callback: types.CallbackQuery, state: FSMContext):
-    category_id = int(callback.data.split(":", 1)[1])
-    await state.update_data(category_id=category_id)
-    user_data = await state.get_data()
-    await edit_product_db(user_data['product_id'], user_data['name'], user_data['price'], 
-                         user_data['stock'], user_data['category_id'], user_data['description'])
-    await callback.message.edit_text(f"✅ تم تعديل المنتج #{user_data['product_id']} بنجاح.")
+    category_id_str = callback.data.split(":", 1)[1]
+    
+    data = await state.get_data()
+    original_product = data['product']
+
+    # Determine which values to use: new ones from state, or original ones
+    product_id_to_update = original_product['product_id']
+    name_to_save = data.get('name', original_product['name'])
+    price_to_save = data.get('price', original_product['price'])
+    stock_to_save = data.get('stock', original_product['stock'])
+    description_to_save = data.get('description', original_product['description'])
+    
+    category_id_to_save = original_product['category_id']
+    if category_id_str != 'skip':
+        category_id_to_save = int(category_id_str)
+
+    await edit_product_db(
+        product_id=product_id_to_update,
+        name=name_to_save,
+        price=price_to_save,
+        stock=stock_to_save,
+        category_id=category_id_to_save,
+        description=description_to_save
+    )
+    
+    await callback.message.edit_text(f"✅ تم تعديل المنتج #{product_id_to_update} بنجاح.")
     await state.clear()
+
 
 @router.message(F.text == "🗑️ حذف منتج")
 async def start_delete_product(message: types.Message, state: FSMContext):
@@ -2355,4 +2415,6 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
+
+". I will be selecting the entire contents of the file. Please modify the code to include an image of the product when browsing and selecting products in the shop. The image should be sent separately before the product details message. Use the `file_url` from the database for the image source. If `file_url` does not look like a valid image URL (e.g., does not end with .jpg, .png, .gif), it should be treated as a document or a non-visual link and no image should be sent.
 
