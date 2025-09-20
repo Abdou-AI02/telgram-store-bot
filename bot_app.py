@@ -45,6 +45,16 @@ async def init_db():
     try:
         pool = await asyncpg.create_pool(DATABASE_URL)
         async with pool.acquire() as conn:
+            # 1. Create categories table first
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS categories (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                parent_id INTEGER REFERENCES categories(id) ON DELETE SET NULL
+            );
+            """)
+
+            # 2. Create other tables
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY, 
@@ -62,10 +72,9 @@ async def init_db():
                 name TEXT NOT NULL, 
                 price REAL NOT NULL, 
                 stock INTEGER DEFAULT 0, 
-                category TEXT, 
+                category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
                 description TEXT, 
                 file_url TEXT,
-                parent_category TEXT DEFAULT NULL,
                 is_active BOOLEAN DEFAULT TRUE
             );
             CREATE TABLE IF NOT EXISTS cart (
@@ -109,14 +118,6 @@ async def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(product_id)
             );
             """)
-            # Add is_active column if it doesn't exist for backward compatibility
-            try:
-                await conn.execute("ALTER TABLE products ADD COLUMN is_active BOOLEAN DEFAULT TRUE;")
-                logger.info("Added 'is_active' column to products table.")
-            except asyncpg.exceptions.DuplicateColumnError:
-                # Column already exists
-                pass
-
         await create_sample_products()
         logger.info("Database initialized successfully.")
     except Exception as e:
@@ -126,23 +127,27 @@ async def init_db():
 
 async def create_sample_products():
     async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM products")
-        if count == 0:
+        cat_count = await conn.fetchval("SELECT COUNT(*) FROM categories")
+        if cat_count == 0:
+            course_cat_id = await conn.fetchval("INSERT INTO categories (name, parent_id) VALUES ('دورات', NULL) RETURNING id")
+            service_cat_id = await conn.fetchval("INSERT INTO categories (name, parent_id) VALUES ('خدمات', NULL) RETURNING id")
+            ai_cat_id = await conn.fetchval("INSERT INTO categories (name, parent_id) VALUES ('ذكاء اصطناعي', $1) RETURNING id", course_cat_id)
+            
             await conn.executemany(
-                """INSERT INTO products (name, price, stock, category, description, file_url) VALUES ($1, $2, $3, $4, $5, $6)""",
+                """INSERT INTO products (name, price, stock, category_id, description, file_url) VALUES ($1, $2, $3, $4, $5, $6)""",
                 [
-                    ("دورة بايثون للمبتدئين", 19.99, 100, "دورة", 
+                    ("دورة بايثون للمبتدئين", 19.99, 100, course_cat_id, 
                      "دورة شاملة لتعلم أساسيات لغة البرمجة بايثون من الصفر.", 
                      "https://example.com/python-course.pdf"),
-                    ("اشتراك دعم تقني شهري", 2.99, 9999, "خدمة", 
+                    ("اشتراك دعم تقني شهري", 2.99, 9999, service_cat_id, 
                      "دعم فني على مدار الساعة لحل مشاكلك التقنية.", 
                      "https://example.com/support-info.txt"),
-                    ("مقدمة في الذكاء الاصطناعي", 49.99, 50, "دورة", 
+                    ("مقدمة في الذكاء الاصطناعي", 49.99, 50, ai_cat_id, 
                      "نظرة عامة على مفاهيم الذكاء الاصطناعي والتعلم الآلي.", 
                      "https://example.com/ai-intro.pdf")
                 ]
             )
-            logger.info("Sample products created.")
+            logger.info("Sample categories and products created.")
 
 
 async def create_user_if_not_exists(user_id: int, first_name: str, referred_by_id: int = None):
@@ -187,24 +192,48 @@ async def update_last_daily_task(user_id: int):
         await conn.execute("UPDATE users SET last_daily_task = CURRENT_TIMESTAMP WHERE user_id = $1", user_id)
 
 
-async def list_products(category: str = None):
+async def list_products(category_id: int = None):
     async with pool.acquire() as conn:
-        if category:
-            return await conn.fetch("SELECT * FROM products WHERE category = $1 AND is_active = TRUE ORDER BY product_id", category)
+        if category_id:
+            return await conn.fetch("SELECT * FROM products WHERE category_id = $1 AND is_active = TRUE ORDER BY product_id", category_id)
         else:
             return await conn.fetch("SELECT * FROM products WHERE is_active = TRUE ORDER BY product_id")
 
-
 async def get_product_by_id(product_id: int):
     async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT * FROM products WHERE product_id=$1", product_id)
+        return await conn.fetchrow("SELECT p.*, c.name as category_name FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.product_id=$1", product_id)
 
-
-async def get_all_categories():
+# --- NEW/MODIFIED CATEGORY DB FUNCTIONS ---
+async def get_subcategories(parent_id: int = None):
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT category FROM products WHERE is_active = TRUE")
-        return [row['category'] for row in rows]
+        if parent_id:
+            return await conn.fetch("SELECT * FROM categories WHERE parent_id = $1 ORDER BY name", parent_id)
+        else:
+            return await conn.fetch("SELECT * FROM categories WHERE parent_id IS NULL ORDER BY name")
 
+async def get_category(category_id: int):
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM categories WHERE id = $1", category_id)
+
+async def get_all_categories_for_admin():
+    async with pool.acquire() as conn:
+        return await conn.fetch("SELECT * FROM categories ORDER BY name")
+
+async def add_category_db(name: str, parent_id: int = None):
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO categories (name, parent_id) VALUES ($1, $2)", name, parent_id)
+
+async def delete_category_db(category_id: int):
+    async with pool.acquire() as conn:
+        # Before deleting, check if it has products or subcategories
+        product_count = await conn.fetchval("SELECT COUNT(*) FROM products WHERE category_id = $1", category_id)
+        subcategory_count = await conn.fetchval("SELECT COUNT(*) FROM categories WHERE parent_id = $1", category_id)
+        if product_count > 0 or subcategory_count > 0:
+            return False  # Indicate that deletion failed because it's not empty
+        await conn.execute("DELETE FROM categories WHERE id = $1", category_id)
+        return True
+
+# --- END OF NEW CATEGORY DB FUNCTIONS ---
 
 async def add_to_cart(user_id, product_id, quantity=1):
     async with pool.acquire() as conn:
@@ -261,8 +290,10 @@ async def create_order(user_id, payment_method, payment_code=None):
 async def get_order_items(order_id):
     async with pool.acquire() as conn:
         return await conn.fetch("""
-            SELECT p.product_id, p.name, p.price, p.file_url, p.category, oi.quantity 
-            FROM order_items oi JOIN products p ON oi.product_id = p.product_id 
+            SELECT p.product_id, p.name, p.price, p.file_url, c.name as category_name, oi.quantity 
+            FROM order_items oi 
+            JOIN products p ON oi.product_id = p.product_id
+            LEFT JOIN categories c ON p.category_id = c.id
             WHERE oi.order_id = $1
         """, order_id)
 
@@ -294,16 +325,16 @@ async def apply_coupon_db(code):
 
 
 # ====== Admin Database Functions ======
-async def add_product_db(name: str, price: float, stock: int, category: str, description: str, file_url: str):
+async def add_product_db(name: str, price: float, stock: int, category_id: int, description: str, file_url: str):
     async with pool.acquire() as conn:
-        await conn.execute("INSERT INTO products (name, price, stock, category, description, file_url) VALUES ($1, $2, $3, $4, $5, $6)", 
-                          name, price, stock, category, description, file_url)
+        await conn.execute("INSERT INTO products (name, price, stock, category_id, description, file_url) VALUES ($1, $2, $3, $4, $5, $6)", 
+                          name, price, stock, category_id, description, file_url)
 
 
-async def edit_product_db(product_id: int, name: str, price: float, stock: int, category: str, description: str):
+async def edit_product_db(product_id: int, name: str, price: float, stock: int, category_id: int, description: str):
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE products SET name=$1, price=$2, stock=$3, category=$4, description=$5 WHERE product_id=$6", 
-                          name, price, stock, category, description, product_id)
+        await conn.execute("UPDATE products SET name=$1, price=$2, stock=$3, category_id=$4, description=$5 WHERE product_id=$6", 
+                          name, price, stock, category_id, description, product_id)
 
 
 async def delete_product_db(product_id: int):
@@ -488,7 +519,7 @@ class AddProductState(StatesGroup):
     name = State()
     price = State()
     stock = State()
-    category = State()
+    category_id = State()
     description = State()
     file_url = State()
 
@@ -501,7 +532,7 @@ class EditAIProductState(StatesGroup):
     name = State()
     price = State()
     stock = State()
-    category = State()
+    category_id = State()
     description = State()
     file_url = State()
 
@@ -510,7 +541,7 @@ class EditProductState(StatesGroup):
     name = State()
     price = State()
     stock = State()
-    category = State()
+    category_id = State()
     description = State()
 
 class DeleteProductState(StatesGroup):
@@ -554,11 +585,10 @@ class ViewOrderDetailsState(StatesGroup):
 class ApplyCouponState(StatesGroup):
     waiting_for_code = State()
 
-# New: FSM for managing store categories and buttons
 class ManageStoreState(StatesGroup):
-    action = State()
     category_name = State()
-    old_category_name = State()
+    parent_id = State()
+    category_to_delete_id = State()
     
 class NotifyUsersState(StatesGroup):
     message_text = State()
@@ -654,7 +684,7 @@ manage_roles_kb = InlineKeyboardMarkup(
 
 manage_store_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="➕ إضافة فئة"), KeyboardButton(text="📝 تعديل فئة"), KeyboardButton(text="🗑️ حذف فئة")],
+        [KeyboardButton(text="➕ إضافة فئة"), KeyboardButton(text="🗑️ حذف فئة")],
         [KeyboardButton(text="🔙 العودة للقائمة الرئيسية")]
     ],
     resize_keyboard=True,
@@ -668,7 +698,7 @@ notify_users_kb = InlineKeyboardMarkup(
     ]
 )
 
-# ====== State Reset Handler - الحل الرئيسي للمشكلة ======
+# ====== State Reset Handler ======
 @router.message(F.text.in_([
     "🛒 المتجر", "📄 طلباتي", "💳 السلة", "🌟 حسابي", "👑 لوحة المشرف",
     "📦 إدارة المنتجات", "📝 إدارة الطلبات", "🏷️ إدارة الكوبونات", "📊 الإحصائيات",
@@ -873,59 +903,77 @@ async def cmd_daily_tasks(message: types.Message):
     
     await message.answer("🎉 لقد أكملت مهمة اليوم وحصلت على 10 نقاط إضافية!")
     
-async def show_categories(message_or_callback, is_edit=False):
-    """دالة مساعدة لعرض فئات المتجر الرئيسية."""
-    categories = await get_all_categories()
-    if not categories:
-        text = "لا توجد فئات منتجات متاحة حالياً."
-        kb = None
-    else:
-        text = "🛒 **المتجر**\n\nاختر فئة من القائمة أدناه:"
-        kb_buttons = [[InlineKeyboardButton(text=cat, callback_data=f"shop_category:{cat}")] for cat in categories]
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+# ====== NEW SHOP NAVIGATION ======
+async def navigate_shop(message_or_callback: types.Message | types.CallbackQuery, category_id: int | None = None, is_edit: bool = False):
+    """
+    دالة مركزية للتنقل في المتجر، تعرض الفئات الفرعية والمنتجات.
+    """
+    # 1. Get subcategories and products for the current level
+    subcategories = await get_subcategories(category_id)
+    products = await list_products(category_id)
+    
+    # 2. Determine current category name and parent for the back button
+    current_category_name = "المتجر"
+    parent_category_id = None
+    if category_id:
+        current_category = await get_category(category_id)
+        if current_category:
+            current_category_name = current_category['name']
+            parent_category_id = current_category['parent_id']
 
-    if is_edit:
-        await message_or_callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-    else:
+    text = f"🛒 **{current_category_name}**\n\nاختر فئة أو منتجاً:"
+    
+    # 3. Build the keyboard
+    kb_buttons = []
+    # Add subcategories first
+    for cat in subcategories:
+        kb_buttons.append([InlineKeyboardButton(text=f"📁 {cat['name']}", callback_data=f"shop_category:{cat['id']}")])
+    # Add products
+    for prod in products:
+        kb_buttons.append([InlineKeyboardButton(text=prod['name'], callback_data=f"product_details:{prod['product_id']}:{category_id}")])
+        
+    # Add back button if not at the top level
+    if category_id is not None:
+        # 'None' as a string because callback data can't be None
+        parent_id_str = str(parent_category_id) if parent_category_id is not None else "None"
+        kb_buttons.append([InlineKeyboardButton(text="🔙 رجوع", callback_data=f"shop_category:{parent_id_str}")])
+
+    if not subcategories and not products:
+        text = f"⚠️ لا توجد منتجات أو فئات فرعية في **{current_category_name}** حالياً."
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    
+    # 4. Send or edit the message
+    if is_edit and isinstance(message_or_callback, types.CallbackQuery):
+        try:
+            await message_or_callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        except Exception as e:
+            logger.warning(f"Could not edit message for shop navigation: {e}")
+            await message_or_callback.answer() # Acknowledge callback
+    elif isinstance(message_or_callback, types.Message):
         await message_or_callback.answer(text, reply_markup=kb, parse_mode="HTML")
 
 @router.message(F.text == "🛒 المتجر")
 async def cmd_shop(message: types.Message):
-    await show_categories(message, is_edit=False)
-
-@router.callback_query(F.data == "shop_main")
-async def back_to_shop_main(callback: types.CallbackQuery):
-    await show_categories(callback, is_edit=True)
-    await callback.answer()
+    await navigate_shop(message, category_id=None, is_edit=False)
 
 @router.callback_query(F.data.startswith("shop_category:"))
-async def show_products_in_category(callback: types.CallbackQuery):
-    category = callback.data.split(":")[1]
-    products = await list_products(category)
-
-    text = f"📦 **منتجات فئة: {category}**"
-    kb_buttons = []
-    if not products:
-        text += "\n\nلا توجد منتجات في هذه الفئة حالياً."
-    else:
-        for product in products:
-            kb_buttons.append([InlineKeyboardButton(text=product['name'], callback_data=f"product_details:{product['product_id']}")])
-
-    kb_buttons.append([InlineKeyboardButton(text="🔙 العودة للفئات", callback_data="shop_main")])
-    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-
-    await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+async def navigate_shop_callback(callback: types.CallbackQuery):
+    category_id_str = callback.data.split(":", 1)[1]
+    category_id = int(category_id_str) if category_id_str != "None" else None
+    await navigate_shop(callback, category_id=category_id, is_edit=True)
     await callback.answer()
+# ====== END OF NEW SHOP NAVIGATION ======
 
 @router.callback_query(F.data.startswith("product_details:"))
 async def show_product_details(callback: types.CallbackQuery):
-    product_id = int(callback.data.split(":")[1])
+    _, product_id_str, category_id_str = callback.data.split(":")
+    product_id = int(product_id_str)
+    
     product = await get_product_by_id(product_id)
 
     if not product or not product['is_active']:
         await callback.answer("⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
-        # Optionally, go back to the category view
-        await show_products_in_category(callback)
         return
 
     text = (
@@ -942,7 +990,7 @@ async def show_product_details(callback: types.CallbackQuery):
             InlineKeyboardButton(text="✅ شراء الآن", callback_data=f"buy_now:{product['product_id']}")
         ])
     
-    kb_buttons.append([InlineKeyboardButton(text=f"🔙 العودة لمنتجات {product['category']}", callback_data=f"shop_category:{product['category']}")])
+    kb_buttons.append([InlineKeyboardButton(text="🔙 العودة", callback_data=f"shop_category:{category_id_str}")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
 
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
@@ -1198,6 +1246,7 @@ async def admin_panel(message: types.Message):
     
     await message.answer("اختر من لوحة تحكم المشرف:", reply_markup=admin_panel_kb)
 
+# ====== NEW ADMIN CATEGORY MANAGEMENT ======
 @router.message(F.text == "🛍️ إدارة المتجر")
 async def manage_store_panel(message: types.Message):
     user_data = await get_user_data(message.from_user.id)
@@ -1216,52 +1265,37 @@ async def start_add_category(message: types.Message, state: FSMContext):
     await message.answer("أرسل اسم الفئة الجديدة:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(ManageStoreState.category_name)
 
-@router.message(ManageStoreState.category_name, F.text != "📝 تعديل فئة")
-async def process_add_category_name(message: types.Message, state: FSMContext):
-    category_name = message.text
-    products = await list_products(category_name)
-    if products:
-        await message.answer(f"⚠️ الفئة '{category_name}' موجودة بالفعل. يرجى اختيار اسم آخر.")
-        return
-    
-    await add_product_db(name=f"منتج وهمي للفئة {category_name}", price=0, stock=0, category=category_name, description="منتج وهمي لإنشاء الفئة", file_url="")
-    await message.answer(f"✅ تم إضافة الفئة '{category_name}' بنجاح.", reply_markup=manage_store_kb)
-    await state.clear()
-
-
-@router.message(F.text == "📝 تعديل فئة")
-async def start_edit_category(message: types.Message, state: FSMContext):
-    user_data = await get_user_data(message.from_user.id)
-    if user_data['role'] not in ['admin', 'owner']:
-        await message.answer("🚫 ليس لديك صلاحيات.")
-        return
-    await message.answer("أرسل اسم الفئة التي تود تعديلها:", reply_markup=types.ReplyKeyboardRemove())
-    await state.set_state(ManageStoreState.old_category_name)
-
-@router.message(ManageStoreState.old_category_name)
-async def process_edit_category_name(message: types.Message, state: FSMContext):
-    old_name = message.text
-    products = await list_products(old_name)
-    if not products:
-        await message.answer(f"⚠️ الفئة '{old_name}' غير موجودة. يرجى إدخال اسم صحيح.")
-        return
-    await state.update_data(old_category_name=old_name)
-    await message.answer("أرسل الاسم الجديد للفئة:")
-    await state.set_state(ManageStoreState.category_name)
-
 @router.message(ManageStoreState.category_name)
-async def process_new_category_name(message: types.Message, state: FSMContext):
+async def process_add_category_name(message: types.Message, state: FSMContext):
+    await state.update_data(category_name=message.text)
+    
+    categories = await get_all_categories_for_admin()
+    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"set_parent:{cat['id']}")] for cat in categories]
+    kb_buttons.append([InlineKeyboardButton(text="🔝 اجعلها فئة رئيسية (لا يوجد أب)", callback_data="set_parent:None")])
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    
+    await message.answer("اختر الفئة الأب لهذه الفئة الجديدة:", reply_markup=kb)
+    await state.set_state(ManageStoreState.parent_id)
+
+@router.callback_query(F.data.startswith("set_parent:"), ManageStoreState.parent_id)
+async def process_set_category_parent(callback: types.CallbackQuery, state: FSMContext):
+    parent_id_str = callback.data.split(":", 1)[1]
+    parent_id = int(parent_id_str) if parent_id_str != "None" else None
+    
     data = await state.get_data()
-    old_name = data.get('old_category_name')
-    if not old_name:
-        return
-    new_name = message.text
+    category_name = data['category_name']
     
-    async with pool.acquire() as conn:
-        await conn.execute("UPDATE products SET category = $1 WHERE category = $2", new_name, old_name)
+    try:
+        await add_category_db(category_name, parent_id)
+        await callback.message.edit_text(f"✅ تم إضافة الفئة '{category_name}' بنجاح.", reply_markup=None)
+    except asyncpg.exceptions.UniqueViolationError:
+        await callback.message.edit_text(f"⚠️ الفئة '{category_name}' موجودة بالفعل. يرجى اختيار اسم آخر.")
+    except Exception as e:
+        logger.error(f"Error adding category: {e}")
+        await callback.message.edit_text("⚠️ حدث خطأ أثناء إضافة الفئة.")
     
-    await message.answer(f"✅ تم تعديل اسم الفئة من '{old_name}' إلى '{new_name}' بنجاح.", reply_markup=manage_store_kb)
     await state.clear()
+    await callback.answer()
 
 @router.message(F.text == "🗑️ حذف فئة")
 async def start_delete_category(message: types.Message, state: FSMContext):
@@ -1269,23 +1303,33 @@ async def start_delete_category(message: types.Message, state: FSMContext):
     if user_data['role'] not in ['admin', 'owner']:
         await message.answer("🚫 ليس لديك صلاحيات.")
         return
-    await message.answer("أرسل اسم الفئة التي تود حذفها (سيتم حذف جميع منتجاتها):", reply_markup=types.ReplyKeyboardRemove())
-    await state.set_state(ManageStoreState.category_name)
-    
-@router.message(ManageStoreState.category_name)
-async def process_delete_category(message: types.Message, state: FSMContext):
-    category_name = message.text
-    products = await list_products(category_name)
-    if not products:
-        await message.answer(f"⚠️ الفئة '{category_name}' غير موجودة. يرجى إدخال اسم صحيح.")
-        return
         
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM products WHERE category = $1", category_name)
-    
-    await message.answer(f"✅ تم حذف الفئة '{category_name}' وجميع منتجاتها بنجاح.", reply_markup=manage_store_kb)
-    await state.clear()
+    categories = await get_all_categories_for_admin()
+    if not categories:
+        await message.answer("لا توجد فئات لحذفها.", reply_markup=manage_store_kb)
+        return
 
+    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"delete_category:{cat['id']}")] for cat in categories]
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    
+    await message.answer("اختر الفئة التي تود حذفها. (ملاحظة: لا يمكن حذف فئة تحتوي على منتجات أو فئات فرعية):", reply_markup=kb)
+    await state.set_state(ManageStoreState.category_to_delete_id)
+
+@router.callback_query(F.data.startswith("delete_category:"), ManageStoreState.category_to_delete_id)
+async def process_delete_category(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    
+    success = await delete_category_db(category_id)
+    
+    if success:
+        await callback.message.edit_text("✅ تم حذف الفئة بنجاح.")
+    else:
+        await callback.message.edit_text("❌ لا يمكن حذف هذه الفئة. يرجى التأكد من أنها فارغة (لا تحتوي على منتجات أو فئات فرعية) ثم حاول مرة أخرى.")
+        
+    await state.clear()
+    await callback.answer()
+
+# ====== END OF NEW ADMIN CATEGORY MANAGEMENT ======
 
 @router.message(F.text == "📦 إدارة المنتجات")
 async def manage_products_panel(message: types.Message):
@@ -1326,39 +1370,47 @@ async def process_product_stock(message: types.Message, state: FSMContext):
     try:
         stock = int(message.text)
         await state.update_data(stock=stock)
-        categories = await get_all_categories()
-        kb_buttons = [[InlineKeyboardButton(text=cat, callback_data=f"add_product_category:{cat}")] for cat in categories]
-        if categories:
-            kb_buttons.append([InlineKeyboardButton(text="➕ إضافة فئة جديدة", callback_data="add_new_category")])
-            kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-            await message.answer("اختر فئة المنتج:", reply_markup=kb)
-            await state.set_state(AddProductState.category)
-        else:
-            await message.answer("لا توجد فئات حالياً. أرسل اسم فئة جديدة.")
-            await state.set_state(AddProductState.category)
+        
+        # Start category selection
+        top_categories = await get_subcategories(None)
+        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat:{cat['id']}")] for cat in top_categories]
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+        await message.answer("اختر فئة المنتج (المستوى 1):", reply_markup=kb)
+        await state.set_state(AddProductState.category_id)
 
     except ValueError:
         await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى.")
 
-@router.callback_query(F.data.startswith("add_product_category:"), AddProductState.category)
-async def set_product_category_from_callback(callback: types.CallbackQuery, state: FSMContext):
-    category = callback.data.split(":")[1]
-    await state.update_data(category=category)
-    await callback.message.edit_text(f"✅ تم اختيار الفئة: <b>{category}</b>\n\nأرسل وصف المنتج:", parse_mode="HTML")
-    await state.set_state(AddProductState.description)
+@router.callback_query(F.data.startswith("select_cat:"), AddProductState.category_id)
+async def process_product_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    
+    subcategories = await get_subcategories(category_id)
+    
+    # If there are subcategories, show them. Otherwise, this is the final category.
+    if subcategories:
+        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat:{cat['id']}")] for cat in subcategories]
+        # Add a button to select the current category itself
+        kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat:{category_id}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+        await callback.message.edit_text("اختر فئة فرعية، أو قم بتأكيد الفئة الحالية:", reply_markup=kb)
+    else:
+        # No subcategories, so this is the final choice
+        await state.update_data(category_id=category_id)
+        category = await get_category(category_id)
+        await callback.message.edit_text(f"✅ تم اختيار الفئة: <b>{category['name']}</b>\n\nأرسل وصف المنتج:", parse_mode="HTML")
+        await state.set_state(AddProductState.description)
+    
     await callback.answer()
 
-@router.callback_query(F.data == "add_new_category", AddProductState.category)
-async def add_new_category_from_product(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text("أرسل اسم الفئة الجديدة:")
-    await state.set_state(AddProductState.category)
-    await callback.answer()
-
-@router.message(AddProductState.category)
-async def process_product_category_text(message: types.Message, state: FSMContext):
-    await state.update_data(category=message.text)
-    await message.answer("أرسل وصف المنتج:")
+@router.callback_query(F.data.startswith("final_cat:"), AddProductState.category_id)
+async def process_final_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(category_id=category_id)
+    category = await get_category(category_id)
+    await callback.message.edit_text(f"✅ تم اختيار الفئة: <b>{category['name']}</b>\n\nأرسل وصف المنتج:", parse_mode="HTML")
     await state.set_state(AddProductState.description)
+    await callback.answer()
     
 @router.message(AddProductState.description)
 async def process_product_description(message: types.Message, state: FSMContext):
@@ -1378,7 +1430,7 @@ async def process_product_file(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     
     await add_product_db(user_data['name'], user_data['price'], user_data['stock'], 
-                        user_data['category'], user_data['description'], user_data['file_url'])
+                        user_data['category_id'], user_data['description'], user_data['file_url'])
     await message.answer(f"✅ تم إضافة المنتج <b>{user_data['name']}</b> بنجاح.", 
                         reply_markup=manage_products_kb, parse_mode="HTML")
     await state.clear()
@@ -1409,14 +1461,14 @@ async def process_product_text_ai(message: types.Message, state: FSMContext):
         "✅ تم استخراج البيانات التالية. هل ترغب في تأكيدها أو تعديلها؟\n\n"
         f"• **الاسم**: {product_data.get('name', 'غير متوفر')}\n"
         f"• **السعر**: {product_data.get('price', 'غير متوفر')}\n"
-        f"• **التصنيف**: {product_data.get('category', 'غير متوفر')}\n"
+        f"• **التصنيف (مقترح)**: {product_data.get('category', 'غير متوفر')}\n"
         f"• **الوصف**: {product_data.get('description', 'غير متوفر')}\n"
-        f"• **رابط الملف**: {product_data.get('file_url', 'غير متوفر')}\n"
+        f"• **رابط الملف**: {product_data.get('file_url', 'غير متوفر')}\n\n"
+        "ملاحظة: ستحتاج إلى اختيار الفئة النهائية يدوياً."
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ تأكيد الإضافة", callback_data="ai_confirm_add")],
-        [InlineKeyboardButton(text="📝 تعديل يدوياً", callback_data="ai_edit_manually")],
+        [InlineKeyboardButton(text="✅ متابعة لاختيار الفئة", callback_data="ai_confirm_add")],
         [InlineKeyboardButton(text="❌ إلغاء", callback_data="ai_cancel")]
     ])
     
@@ -1425,90 +1477,46 @@ async def process_product_text_ai(message: types.Message, state: FSMContext):
 
 @router.callback_query(F.data == "ai_confirm_add", AddProductAIState.confirm_data)
 async def confirm_add_product_ai(callback: types.CallbackQuery, state: FSMContext):
+    # Start category selection process for the AI-generated product
+    top_categories = await get_subcategories(None)
+    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_ai:{cat['id']}")] for cat in top_categories]
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    await callback.message.edit_text("اختر فئة المنتج (المستوى 1):", reply_markup=kb)
+    await state.set_state(EditAIProductState.category_id) # Use a different state to avoid conflict
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("select_cat_ai:"), EditAIProductState.category_id)
+async def process_ai_product_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    subcategories = await get_subcategories(category_id)
+    if subcategories:
+        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_ai:{cat['id']}")] for cat in subcategories]
+        kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_ai:{category_id}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+        await callback.message.edit_text("اختر فئة فرعية، أو قم بتأكيد الفئة الحالية:", reply_markup=kb)
+    else:
+        await process_final_ai_category_selection(callback, state) # Directly call final step
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("final_cat_ai:"), EditAIProductState.category_id)
+async def process_final_ai_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
     data = await state.get_data()
     try:
         await add_product_db(
-            name=data.get('name'),
-            price=data.get('price'),
-            stock=100,
-            category=data.get('category'),
-            description=data.get('description'),
-            file_url=data.get('file_url')
+            name=data.get('name'), price=data.get('price'), stock=100,
+            category_id=category_id,
+            description=data.get('description'), file_url=data.get('file_url')
         )
         await callback.message.edit_text(
             f"✅ تم إضافة المنتج <b>{data['name']}</b> بنجاح إلى قاعدة البيانات.",
-            parse_mode="HTML",
-            reply_markup=None
+            parse_mode="HTML", reply_markup=None
         )
     except Exception as e:
         logger.error(f"Failed to add AI-generated product to DB: {e}")
-        await callback.message.edit_text("⚠️ حدث خطأ أثناء حفظ المنتج في قاعدة البيانات. يرجى المحاولة مرة أخرى.", reply_markup=None)
-
+        await callback.message.edit_text("⚠️ حدث خطأ أثناء حفظ المنتج في قاعدة البيانات.", reply_markup=None)
     await state.clear()
     await callback.answer()
-
-@router.callback_query(F.data == "ai_edit_manually", AddProductAIState.confirm_data)
-async def edit_product_ai(callback: types.CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    await state.set_state(EditAIProductState.name)
-    await state.update_data(**data)
-    await callback.message.edit_text("يرجى إرسال اسم المنتج الجديد:", reply_markup=None)
-    await callback.answer()
-
-@router.message(EditAIProductState.name)
-async def process_edit_ai_name(message: types.Message, state: FSMContext):
-    await state.update_data(name=message.text)
-    await message.answer("أرسل السعر الجديد للمنتج:")
-    await state.set_state(EditAIProductState.price)
-
-@router.message(EditAIProductState.price)
-async def process_edit_ai_price(message: types.Message, state: FSMContext):
-    try:
-        price = float(message.text)
-        await state.update_data(price=price)
-        await message.answer("أرسل الكمية الجديدة المتوفرة:")
-        await state.set_state(EditAIProductState.stock)
-    except ValueError:
-        await message.answer("⚠️ السعر يجب أن يكون رقماً. أرسل السعر مرة أخرى.")
-
-@router.message(EditAIProductState.stock)
-async def process_edit_ai_stock(message: types.Message, state: FSMContext):
-    try:
-        stock = int(message.text)
-        await state.update_data(stock=stock)
-        await message.answer("أرسل التصنيف الجديد للمنتج:")
-        await state.set_state(EditAIProductState.category)
-    except ValueError:
-        await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى.")
-
-@router.message(EditAIProductState.category)
-async def process_edit_ai_category(message: types.Message, state: FSMContext):
-    await state.update_data(category=message.text)
-    await message.answer("أرسل وصف المنتج الجديد:")
-    await state.set_state(EditAIProductState.description)
-    
-@router.message(EditAIProductState.description)
-async def process_edit_ai_description(message: types.Message, state: FSMContext):
-    await state.update_data(description=message.text)
-    await message.answer("أرسل رابط أو ملف المنتج:")
-    await state.set_state(EditAIProductState.file_url)
-
-@router.message(EditAIProductState.file_url)
-async def process_edit_ai_file(message: types.Message, state: FSMContext):
-    file_url = message.text
-    if message.document:
-        file_url = message.document.file_id
-    elif message.photo:
-        file_url = message.photo[-1].file_id
-
-    await state.update_data(file_url=file_url)
-    user_data = await state.get_data()
-    
-    await add_product_db(user_data['name'], user_data['price'], user_data['stock'], 
-                        user_data['category'], user_data['description'], user_data['file_url'])
-    await message.answer(f"✅ تم إضافة المنتج <b>{user_data['name']}</b> بنجاح.", 
-                        reply_markup=manage_products_kb, parse_mode="HTML")
-    await state.clear()
 
 
 @router.callback_query(F.data == "ai_cancel", AddProductAIState.confirm_data)
@@ -1563,24 +1571,42 @@ async def process_edit_product_stock(message: types.Message, state: FSMContext):
     try:
         stock = int(message.text)
         await state.update_data(stock=stock)
-        await message.answer("أرسل التصنيف الجديد للمنتج:")
-        await state.set_state(EditProductState.category)
+        await message.answer("أرسل وصف المنتج الجديد:")
+        await state.set_state(EditProductState.description)
     except ValueError:
         await message.answer("⚠️ الكمية يجب أن تكون رقماً صحيحاً. أرسل الكمية مرة أخرى.")
-
-@router.message(EditProductState.category)
-async def process_edit_product_category(message: types.Message, state: FSMContext):
-    await state.update_data(category=message.text)
-    await message.answer("أرسل وصف المنتج الجديد:")
-    await state.set_state(EditProductState.description)
 
 @router.message(EditProductState.description)
 async def process_edit_product_description(message: types.Message, state: FSMContext):
     await state.update_data(description=message.text)
+    # Start category selection for editing
+    top_categories = await get_subcategories(None)
+    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in top_categories]
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+    await message.answer("اختر الفئة الجديدة للمنتج (المستوى 1):", reply_markup=kb)
+    await state.set_state(EditProductState.category_id)
+
+@router.callback_query(F.data.startswith("select_cat_edit:"), EditProductState.category_id)
+async def process_edit_product_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    subcategories = await get_subcategories(category_id)
+    if subcategories:
+        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in subcategories]
+        kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_edit:{category_id}")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
+        await callback.message.edit_text("اختر فئة فرعية، أو قم بتأكيد الفئة الحالية:", reply_markup=kb)
+    else:
+        await process_final_edit_category_selection(callback, state)
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("final_cat_edit:"), EditProductState.category_id)
+async def process_final_edit_category_selection(callback: types.CallbackQuery, state: FSMContext):
+    category_id = int(callback.data.split(":", 1)[1])
+    await state.update_data(category_id=category_id)
     user_data = await state.get_data()
     await edit_product_db(user_data['product_id'], user_data['name'], user_data['price'], 
-                         user_data['stock'], user_data['category'], user_data['description'])
-    await message.answer(f"✅ تم تعديل المنتج #{user_data['product_id']} بنجاح.", reply_markup=manage_products_kb)
+                         user_data['stock'], user_data['category_id'], user_data['description'])
+    await callback.message.edit_text(f"✅ تم تعديل المنتج #{user_data['product_id']} بنجاح.")
     await state.clear()
 
 @router.message(F.text == "🗑️ حذف منتج")
@@ -1622,9 +1648,13 @@ async def list_products_admin_handler(message: types.Message):
         await message.answer("🚫 ليس لديك صلاحيات.")
         return
     
-    # Fetch all products for admin view, regardless of active status
     async with pool.acquire() as conn:
-        products = await conn.fetch("SELECT * FROM products ORDER BY product_id")
+        products = await conn.fetch("""
+            SELECT p.*, c.name as category_name 
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.id
+            ORDER BY p.product_id
+        """)
 
     if not products:
         await message.answer("لا توجد منتجات حالياً.")
@@ -1632,10 +1662,11 @@ async def list_products_admin_handler(message: types.Message):
     text = "📦 **قائمة كل المنتجات:**\n\n"
     for p in products:
         status = "نشط" if p['is_active'] else "مؤرشف"
+        category_name = p['category_name'] if p['category_name'] else "غير مصنف"
         text += (f"- <code>#{p['product_id']}</code>: <b>{p['name']}</b>\n"
                  f"  الحالة: {status}\n"
                  f"  السعر: {p['price']:.2f} {DEFAULT_CURRENCY} ({p['price'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n"
-                 f"  المخزون: {p['stock']}\n  التصنيف: {p['category']}\n")
+                 f"  المخزون: {p['stock']}\n  التصنيف: {category_name}\n")
     await message.answer(text, parse_mode="HTML")
 
 @router.message(F.text == "🏷️ إدارة الكوبونات")
@@ -2256,9 +2287,10 @@ async def cmd_coupon(message: types.Message, state: FSMContext):
 # Scheduler for automated tasks
 async def auto_notifications(bot: Bot):
     while True:
+        await asyncio.sleep(3600) # Check every hour
         now = datetime.now()
         # Weekly sales report on Sunday
-        if now.weekday() == 6 and now.hour == 10 and now.minute == 0:
+        if now.weekday() == 6 and now.hour == 10:
             total_sales = await get_total_sales_db()
             total_orders = await get_total_orders_db()
             most_popular_products = await get_most_popular_products()
@@ -2279,17 +2311,16 @@ async def auto_notifications(bot: Bot):
                     logger.error(f"Failed to send weekly report to admin {admin_id}: {e}")
         
         # Low stock notification
-        products_stock = await list_products()
-        for p in products_stock:
-            if p['stock'] <= 50 and p['stock'] > 0:
-                for admin_id in ADMINS:
-                    try:
-                        await bot.send_message(admin_id, f"⚠️ **تنبيه انخفاض المخزون:**\n\nالمنتج <b>{p['name']}</b> يتبقى منه {p['stock']} قطعة فقط!", parse_mode="HTML")
-                    except Exception as e:
-                        logger.error(f"Failed to send low stock alert to admin {admin_id}: {e}")
+        async with pool.acquire() as conn:
+            products_stock = await conn.fetch("SELECT * FROM products WHERE is_active = TRUE AND stock <= 10 AND stock > 0")
         
-        await asyncio.sleep(3600) # Check every hour
-
+        for p in products_stock:
+            for admin_id in ADMINS:
+                try:
+                    await bot.send_message(admin_id, f"⚠️ **تنبيه انخفاض المخزون:**\n\nالمنتج <b>{p['name']}</b> يتبقى منه {p['stock']} قطعة فقط!", parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"Failed to send low stock alert to admin {admin_id}: {e}")
+        
 async def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN not found in .env file.")
