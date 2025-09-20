@@ -118,6 +118,52 @@ async def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(product_id)
             );
             """)
+            
+            # --- Start of migration logic ---
+            # This transaction will attempt to migrate the schema from using a text 'category'
+            # to a 'category_id' foreign key.
+            async with conn.transaction():
+                # Check if the old 'category' column exists in the 'products' table.
+                has_old_category_column = await conn.fetchval("""
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.columns 
+                        WHERE table_name='products' AND column_name='category'
+                    );
+                """)
+                
+                if has_old_category_column:
+                    logger.info("Old 'products' schema detected. Starting migration...")
+                    
+                    # Add the new 'category_id' column if it doesn't already exist.
+                    await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL;")
+
+                    # Get all unique category names from the old text column.
+                    old_categories = await conn.fetch("SELECT DISTINCT category FROM products WHERE category IS NOT NULL;")
+                    
+                    for record in old_categories:
+                        cat_name = record['category']
+                        if not cat_name: continue
+
+                        # Check if this category already exists in the new 'categories' table.
+                        existing_cat_id = await conn.fetchval("SELECT id FROM categories WHERE name = $1;", cat_name)
+                        
+                        if not existing_cat_id:
+                            # If it doesn't exist, insert it as a new top-level category.
+                            new_cat_id = await conn.fetchval("INSERT INTO categories (name, parent_id) VALUES ($1, NULL) ON CONFLICT (name) DO NOTHING RETURNING id;", cat_name)
+                            if not new_cat_id: # If another process inserted it concurrently
+                                new_cat_id = await conn.fetchval("SELECT id FROM categories WHERE name = $1;", cat_name)
+                        else:
+                            new_cat_id = existing_cat_id
+                        
+                        # Update all products that had the old category name with the new category ID.
+                        if new_cat_id:
+                            await conn.execute("UPDATE products SET category_id = $1 WHERE category = $2;", new_cat_id, cat_name)
+                    
+                    # Finally, remove the old 'category' column as it's no longer needed.
+                    await conn.execute("ALTER TABLE products DROP COLUMN category;")
+                    logger.info("Database migration completed successfully.")
+            # --- End of migration logic ---
+
         await create_sample_products()
         logger.info("Database initialized successfully.")
     except Exception as e:
