@@ -512,6 +512,16 @@ async def generate_product_data_with_ai(user_text: str) -> dict:
         logger.error(f"AI generation failed: {e}")
         return None
 
+# ====== Helper Functions ======
+def is_image_url(url: str | None) -> bool:
+    """Checks if a given string is a URL pointing to an image."""
+    if not url or not isinstance(url, str):
+        return False
+    # Check if it's an HTTP URL and has a common image extension.
+    if url.lower().startswith('http'):
+        return url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))
+    return False
+
 # ====== FSM States ======
 router = Router()
 
@@ -981,6 +991,18 @@ async def show_product_details(callback: types.CallbackQuery):
         await callback.answer("⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
         return
 
+    # Check for image and send it first
+    file_url = product.get('file_url')
+    if is_image_url(file_url):
+        try:
+            # Sending a new message with the photo. The original message will be edited below.
+            await callback.message.answer_photo(photo=file_url)
+        except Exception as e:
+            logger.error(f"Failed to send product photo from URL {file_url}: {e}")
+            # Inform user if photo fails but continue
+            await callback.answer("لم نتمكن من تحميل صورة المنتج.", show_alert=True)
+
+
     text = (
         f"🛍️ **{product['name']}**\n\n"
         f"• **الوصف:** {product['description']}\n"
@@ -998,6 +1020,7 @@ async def show_product_details(callback: types.CallbackQuery):
     kb_buttons.append([InlineKeyboardButton(text="🔙 العودة", callback_data=f"shop_category:{category_id_str}")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
 
+    # Edit the original message to show the details
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     await callback.answer()
 
@@ -1182,7 +1205,7 @@ async def pay_with_points(callback: types.CallbackQuery, state: FSMContext):
         try:
             await Bot.get_current().send_message(
                 referrer_id,
-                f"🎉 تهانينا! الشخص الذي قمت بإhalته قام بالشراء، وحصلت على {purchase_points} نقطة إضافية."
+                f"🎉 تهانينا! الشخص الذي قمت بإحالته قام بالشراء، وحصلت على {purchase_points} نقطة إضافية."
             )
         except Exception as e:
             logger.error(f"Failed to notify referrer {referrer_id} on purchase: {e}")
@@ -2415,6 +2438,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-
-". I will be selecting the entire contents of the file. Please modify the code to include an image of the product when browsing and selecting products in the shop. The image should be sent separately before the product details message. Use the `file_url` from the database for the image source. If `file_url` does not look like a valid image URL (e.g., does not end with .jpg, .png, .gif), it should be treated as a document or a non-visual link and no image should be sent.
 
