@@ -556,6 +556,12 @@ def is_image_url(url: str | None) -> bool:
         return url.lower().endswith(('.png', '.jpg', '.jpeg', '.gif'))
     return False
 
+def truncate_text(text: str, max_length: int = 40) -> str:
+    """Truncates text to a maximum length, adding '...' if truncated."""
+    if len(text) > max_length:
+        return text[:max_length - 3] + "..."
+    return text
+
 # ====== FSM States ======
 router = Router()
 
@@ -976,10 +982,10 @@ async def navigate_shop(message_or_callback: types.Message | types.CallbackQuery
     kb_buttons = []
     # Add subcategories first
     for cat in subcategories:
-        kb_buttons.append([InlineKeyboardButton(text=f"📁 {cat['name']}", callback_data=f"shop_category:{cat['id']}")])
+        kb_buttons.append([InlineKeyboardButton(text=f"📁 {truncate_text(cat['name'])}", callback_data=f"shop_category:{cat['id']}")])
     # Add products
     for prod in products:
-        kb_buttons.append([InlineKeyboardButton(text=prod['name'], callback_data=f"product_details:{prod['product_id']}:{category_id}")])
+        kb_buttons.append([InlineKeyboardButton(text=truncate_text(prod['name']), callback_data=f"product_details:{prod['product_id']}:{category_id}")])
         
     # Add back button if not at the top level
     if category_id is not None:
@@ -1110,7 +1116,7 @@ async def cmd_cart(message: types.Message, state: FSMContext):
     for item in items:
         total_price += item['price'] * item['quantity']
         text += f"• {item['name']} - الكمية: {item['quantity']} - السعر: {item['price']:.2f} {DEFAULT_CURRENCY}\n"
-        kb_buttons.append([InlineKeyboardButton(text=f"➖ {item['name']}", callback_data=f"remove_from_cart:{item['product_id']}")])
+        kb_buttons.append([InlineKeyboardButton(text=f"➖ {truncate_text(item['name'])}", callback_data=f"remove_from_cart:{item['product_id']}")])
 
     
     state_data = await state.get_data()
@@ -1332,7 +1338,7 @@ async def process_add_category_name(message: types.Message, state: FSMContext):
     await state.update_data(category_name=message.text)
     
     categories = await get_all_categories_for_admin()
-    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"set_parent:{cat['id']}")] for cat in categories]
+    kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"set_parent:{cat['id']}")] for cat in categories]
     kb_buttons.append([InlineKeyboardButton(text="🔝 اجعلها فئة رئيسية (لا يوجد أب)", callback_data="set_parent:None")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     
@@ -1371,7 +1377,7 @@ async def start_delete_category(message: types.Message, state: FSMContext):
         await message.answer("لا توجد فئات لحذفها.", reply_markup=manage_store_kb)
         return
 
-    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"delete_category:{cat['id']}")] for cat in categories]
+    kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"delete_category:{cat['id']}")] for cat in categories]
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     
     await message.answer("اختر الفئة التي تود حذفها. (ملاحظة: لا يمكن حذف فئة تحتوي على منتجات أو فئات فرعية):", reply_markup=kb)
@@ -1435,7 +1441,7 @@ async def process_product_stock(message: types.Message, state: FSMContext):
         
         # Start category selection
         top_categories = await get_subcategories(None)
-        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat:{cat['id']}")] for cat in top_categories]
+        kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat:{cat['id']}")] for cat in top_categories]
         kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
         await message.answer("اختر فئة المنتج (المستوى 1):", reply_markup=kb)
         await state.set_state(AddProductState.category_id)
@@ -1451,7 +1457,7 @@ async def process_product_category_selection(callback: types.CallbackQuery, stat
     
     # If there are subcategories, show them. Otherwise, this is the final category.
     if subcategories:
-        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat:{cat['id']}")] for cat in subcategories]
+        kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat:{cat['id']}")] for cat in subcategories]
         # Add a button to select the current category itself
         kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat:{category_id}")])
         kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
@@ -1541,7 +1547,7 @@ async def process_product_text_ai(message: types.Message, state: FSMContext):
 async def confirm_add_product_ai(callback: types.CallbackQuery, state: FSMContext):
     # Start category selection process for the AI-generated product
     top_categories = await get_subcategories(None)
-    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_ai:{cat['id']}")] for cat in top_categories]
+    kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat_ai:{cat['id']}")] for cat in top_categories]
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     await callback.message.edit_text("اختر فئة المنتج (المستوى 1):", reply_markup=kb)
     await state.set_state(EditAIProductState.category_id) # Use a different state to avoid conflict
@@ -1552,7 +1558,7 @@ async def process_ai_product_category_selection(callback: types.CallbackQuery, s
     category_id = int(callback.data.split(":", 1)[1])
     subcategories = await get_subcategories(category_id)
     if subcategories:
-        kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_ai:{cat['id']}")] for cat in subcategories]
+        kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat_ai:{cat['id']}")] for cat in subcategories]
         kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_ai:{category_id}")])
         kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
         await callback.message.edit_text("اختر فئة فرعية، أو قم بتأكيد الفئة الحالية:", reply_markup=kb)
@@ -1710,7 +1716,7 @@ async def process_edit_product_description(message: types.Message, state: FSMCon
         await state.update_data(description=message.text)
     
     top_categories = await get_subcategories(None)
-    kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in top_categories]
+    kb_buttons = [[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat_edit:{cat['id']}")] for cat in top_categories]
     kb_buttons.append([InlineKeyboardButton(text="⏭️ تخطي (إبقاء الفئة الحالية)", callback_data="final_cat_edit:skip")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     await message.answer("الرجاء اختيار فئة من الأزرار أدناه. (سيختفي زر التخطي الكتابي)", reply_markup=types.ReplyKeyboardRemove())
@@ -1723,7 +1729,7 @@ async def process_edit_product_category_selection(callback: types.CallbackQuery,
     subcategories = await get_subcategories(category_id)
     kb_buttons = []
     if subcategories:
-        kb_buttons.extend([[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in subcategories])
+        kb_buttons.extend([[InlineKeyboardButton(text=truncate_text(cat['name']), callback_data=f"select_cat_edit:{cat['id']}")] for cat in subcategories])
     
     kb_buttons.append([InlineKeyboardButton(text="✅ اختر هذه الفئة", callback_data=f"final_cat_edit:{category_id}")])
     kb_buttons.append([InlineKeyboardButton(text="⏭️ تخطي (إبقاء الفئة الحالية)", callback_data=f"final_cat_edit:skip")])
