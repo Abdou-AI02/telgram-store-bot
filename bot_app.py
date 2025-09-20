@@ -8,6 +8,7 @@ import secrets
 import json
 import aiohttp
 import asyncpg
+from asyncpg.exceptions import ForeignKeyViolationError
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.state import State, StatesGroup
@@ -64,7 +65,8 @@ async def init_db():
                 category TEXT, 
                 description TEXT, 
                 file_url TEXT,
-                parent_category TEXT DEFAULT NULL
+                parent_category TEXT DEFAULT NULL,
+                is_active BOOLEAN DEFAULT TRUE
             );
             CREATE TABLE IF NOT EXISTS cart (
                 id SERIAL PRIMARY KEY, 
@@ -107,6 +109,14 @@ async def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(product_id)
             );
             """)
+            # Add is_active column if it doesn't exist for backward compatibility
+            try:
+                await conn.execute("ALTER TABLE products ADD COLUMN is_active BOOLEAN DEFAULT TRUE;")
+                logger.info("Added 'is_active' column to products table.")
+            except asyncpg.exceptions.DuplicateColumnError:
+                # Column already exists
+                pass
+
         await create_sample_products()
         logger.info("Database initialized successfully.")
     except Exception as e:
@@ -180,9 +190,9 @@ async def update_last_daily_task(user_id: int):
 async def list_products(category: str = None):
     async with pool.acquire() as conn:
         if category:
-            return await conn.fetch("SELECT * FROM products WHERE category = $1 ORDER BY product_id", category)
+            return await conn.fetch("SELECT * FROM products WHERE category = $1 AND is_active = TRUE ORDER BY product_id", category)
         else:
-            return await conn.fetch("SELECT * FROM products ORDER BY product_id")
+            return await conn.fetch("SELECT * FROM products WHERE is_active = TRUE ORDER BY product_id")
 
 
 async def get_product_by_id(product_id: int):
@@ -192,7 +202,7 @@ async def get_product_by_id(product_id: int):
 
 async def get_all_categories():
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT DISTINCT category FROM products")
+        rows = await conn.fetch("SELECT DISTINCT category FROM products WHERE is_active = TRUE")
         return [row['category'] for row in rows]
 
 
@@ -221,7 +231,7 @@ async def get_cart_items(user_id):
         return await conn.fetch("""
             SELECT c.id, c.product_id, c.quantity, p.name, p.price, p.file_url 
             FROM cart c JOIN products p ON c.product_id = p.product_id 
-            WHERE c.user_id = $1
+            WHERE c.user_id = $1 AND p.is_active = TRUE
         """, user_id)
 
 
@@ -297,8 +307,9 @@ async def edit_product_db(product_id: int, name: str, price: float, stock: int, 
 
 
 async def delete_product_db(product_id: int):
+    # This now archives the product instead of deleting it
     async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM products WHERE product_id=$1", product_id)
+        await conn.execute("UPDATE products SET is_active = FALSE WHERE product_id=$1", product_id)
 
 
 async def add_coupon_db(code: str, discount: float):
@@ -385,6 +396,7 @@ async def get_most_popular_products():
             SELECT p.name, SUM(oi.quantity) as total_sold
             FROM order_items oi
             JOIN products p ON oi.product_id = p.product_id
+            WHERE p.is_active = TRUE
             GROUP BY p.product_id
             ORDER BY total_sold DESC
             LIMIT 5
@@ -910,8 +922,10 @@ async def show_product_details(callback: types.CallbackQuery):
     product_id = int(callback.data.split(":")[1])
     product = await get_product_by_id(product_id)
 
-    if not product:
-        await callback.answer("⚠️ المنتج غير موجود.", show_alert=True)
+    if not product or not product['is_active']:
+        await callback.answer("⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
+        # Optionally, go back to the category view
+        await show_products_in_category(callback)
         return
 
     text = (
@@ -938,8 +952,12 @@ async def show_product_details(callback: types.CallbackQuery):
 async def add_to_cart_callback(callback: types.CallbackQuery):
     product_id = int(callback.data.split(":")[1])
     try:
-        await add_to_cart(callback.from_user.id, product_id)
         product = await get_product_by_id(product_id)
+        if not product or not product['is_active']:
+            await callback.answer("⚠️ هذا المنتج لم يعد متوفراً.", show_alert=True)
+            return
+
+        await add_to_cart(callback.from_user.id, product_id)
         await callback.answer(f"✅ تم إضافة {product['name']} إلى سلتك.", show_alert=True)
     except Exception as e:
         logger.error(f"Failed to add to cart: {e}")
@@ -950,7 +968,7 @@ async def buy_now_callback(callback: types.CallbackQuery, state: FSMContext):
     product_id = int(callback.data.split(":")[1])
     try:
         product = await get_product_by_id(product_id)
-        if not product:
+        if not product or not product['is_active']:
             await callback.answer("⚠️ المنتج غير موجود.", show_alert=True)
             return
 
@@ -1571,7 +1589,7 @@ async def start_delete_product(message: types.Message, state: FSMContext):
     if user_data['role'] not in ['admin', 'owner']:
         await message.answer("🚫 ليس لديك صلاحيات.")
         return
-    await message.answer("أرسل رقم المنتج الذي تود حذفه:", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("أرسل رقم المنتج الذي تود حذفه/أرشفته:", reply_markup=types.ReplyKeyboardRemove())
     await state.set_state(DeleteProductState.product_id)
 
 @router.message(DeleteProductState.product_id)
@@ -1580,15 +1598,21 @@ async def process_delete_product_id(message: types.Message, state: FSMContext):
         pid = int(message.text)
         product = await get_product_by_id(pid)
         if not product:
-            await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.")
+            await message.answer("⚠️ لم يتم العثور على المنتج. أرسل رقماً صحيحاً.", reply_markup=manage_products_kb)
             await state.clear()
             return
-        await delete_product_db(pid)
-        await message.answer(f"✅ تم حذف المنتج <b>{product['name']}</b> بنجاح.", 
+        
+        await delete_product_db(pid) # This now archives the product
+        await message.answer(f"✅ تم أرشفة المنتج <b>{product['name']}</b> بنجاح. لن يظهر في المتجر بعد الآن.", 
                            reply_markup=manage_products_kb, parse_mode="HTML")
         await state.clear()
+
     except ValueError:
-        await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.")
+        await message.answer("⚠️ رقم المنتج يجب أن يكون رقماً. أرسل الرقم مرة أخرى.", reply_markup=manage_products_kb)
+        await state.clear()
+    except Exception as e:
+        logger.error(f"An unexpected error occurred while archiving product {message.text}: {e}")
+        await message.answer("⚠️ حدث خطأ غير متوقع أثناء محاولة أرشفة المنتج.", reply_markup=manage_products_kb)
         await state.clear()
     
 @router.message(F.text == "📜 عرض المنتجات")
@@ -1597,13 +1621,21 @@ async def list_products_admin_handler(message: types.Message):
     if user_data['role'] not in ['admin', 'owner']:
         await message.answer("🚫 ليس لديك صلاحيات.")
         return
-    products = await list_products()
+    
+    # Fetch all products for admin view, regardless of active status
+    async with pool.acquire() as conn:
+        products = await conn.fetch("SELECT * FROM products ORDER BY product_id")
+
     if not products:
         await message.answer("لا توجد منتجات حالياً.")
         return
-    text = "📦 **قائمة المنتجات:**\n\n"
+    text = "📦 **قائمة كل المنتجات:**\n\n"
     for p in products:
-        text += f"- <code>#{p['product_id']}</code>: <b>{p['name']}</b>\n  السعر: {p['price']:.2f} {DEFAULT_CURRENCY} ({p['price'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n  المخزون: {p['stock']}\n  التصنيف: {p['category']}\n"
+        status = "نشط" if p['is_active'] else "مؤرشف"
+        text += (f"- <code>#{p['product_id']}</code>: <b>{p['name']}</b>\n"
+                 f"  الحالة: {status}\n"
+                 f"  السعر: {p['price']:.2f} {DEFAULT_CURRENCY} ({p['price'] * DZD_TO_USD_RATE:.2f} دينار جزائري)\n"
+                 f"  المخزون: {p['stock']}\n  التصنيف: {p['category']}\n")
     await message.answer(text, parse_mode="HTML")
 
 @router.message(F.text == "🏷️ إدارة الكوبونات")
@@ -2247,8 +2279,8 @@ async def auto_notifications(bot: Bot):
                     logger.error(f"Failed to send weekly report to admin {admin_id}: {e}")
         
         # Low stock notification
-        products = await list_products()
-        for p in products:
+        products_stock = await list_products()
+        for p in products_stock:
             if p['stock'] <= 50 and p['stock'] > 0:
                 for admin_id in ADMINS:
                     try:
@@ -2292,3 +2324,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
+
