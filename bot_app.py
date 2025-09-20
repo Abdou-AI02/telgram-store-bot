@@ -1587,6 +1587,42 @@ async def cancel_add_product_ai(callback: types.CallbackQuery, state: FSMContext
     await callback.message.edit_text("تم إلغاء عملية إضافة المنتج.", reply_markup=None)
     await callback.answer()
 
+# ====== Helper function for editing product ======
+async def finalize_product_edit(source: types.Message | types.CallbackQuery, state: FSMContext, category_id_str: str):
+    data = await state.get_data()
+    original_product = data['product']
+    message_to_respond = source.message if isinstance(source, types.CallbackQuery) else source
+
+    # Determine which values to use: new ones from state, or original ones
+    product_id_to_update = original_product['product_id']
+    name_to_save = data.get('name', original_product['name'])
+    price_to_save = data.get('price', original_product['price'])
+    stock_to_save = data.get('stock', original_product['stock'])
+    description_to_save = data.get('description', original_product['description'])
+    
+    category_id_to_save = original_product['category_id']
+    if category_id_str != 'skip':
+        category_id_to_save = int(category_id_str)
+
+    await edit_product_db(
+        product_id=product_id_to_update,
+        name=name_to_save,
+        price=price_to_save,
+        stock=stock_to_save,
+        category_id=category_id_to_save,
+        description=description_to_save
+    )
+    
+    final_message = f"✅ تم تعديل المنتج #{product_id_to_update} بنجاح."
+
+    # If it was a callback, we can delete the inline keyboard message for a cleaner UI
+    if isinstance(source, types.CallbackQuery):
+        await source.message.delete()
+
+    await message_to_respond.answer(final_message, reply_markup=manage_products_kb)
+    await state.clear()
+
+
 @router.message(F.text == "📝 تعديل منتج")
 async def start_edit_product(message: types.Message, state: FSMContext):
     user_data = await get_user_data(message.from_user.id)
@@ -1677,7 +1713,8 @@ async def process_edit_product_description(message: types.Message, state: FSMCon
     kb_buttons = [[InlineKeyboardButton(text=cat['name'], callback_data=f"select_cat_edit:{cat['id']}")] for cat in top_categories]
     kb_buttons.append([InlineKeyboardButton(text="⏭️ تخطي (إبقاء الفئة الحالية)", callback_data="final_cat_edit:skip")])
     kb = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
-    await message.answer("اختر الفئة الجديدة للمنتج، أو تخطى:", reply_markup=kb)
+    await message.answer("الرجاء اختيار فئة من الأزرار أدناه. (سيختفي زر التخطي الكتابي)", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer("اختر الفئة الجديدة للمنتج، أو تخطى باستخدام الزر:", reply_markup=kb)
     await state.set_state(EditProductState.category_id)
 
 @router.callback_query(F.data.startswith("select_cat_edit:"), EditProductState.category_id)
@@ -1698,32 +1735,8 @@ async def process_edit_product_category_selection(callback: types.CallbackQuery,
 @router.callback_query(F.data.startswith("final_cat_edit:"), EditProductState.category_id)
 async def process_final_edit_category_selection(callback: types.CallbackQuery, state: FSMContext):
     category_id_str = callback.data.split(":", 1)[1]
-    
-    data = await state.get_data()
-    original_product = data['product']
-
-    # Determine which values to use: new ones from state, or original ones
-    product_id_to_update = original_product['product_id']
-    name_to_save = data.get('name', original_product['name'])
-    price_to_save = data.get('price', original_product['price'])
-    stock_to_save = data.get('stock', original_product['stock'])
-    description_to_save = data.get('description', original_product['description'])
-    
-    category_id_to_save = original_product['category_id']
-    if category_id_str != 'skip':
-        category_id_to_save = int(category_id_str)
-
-    await edit_product_db(
-        product_id=product_id_to_update,
-        name=name_to_save,
-        price=price_to_save,
-        stock=stock_to_save,
-        category_id=category_id_to_save,
-        description=description_to_save
-    )
-    
-    await callback.message.edit_text(f"✅ تم تعديل المنتج #{product_id_to_update} بنجاح.")
-    await state.clear()
+    await finalize_product_edit(callback, state, category_id_str)
+    await callback.answer()
 
 
 @router.message(F.text == "🗑️ حذف منتج")
@@ -2472,4 +2485,7 @@ if __name__ == "__main__":
         logger.info("Bot stopped manually.")
     except Exception as e:
         logger.error(f"An error occurred: {e}")
+
+" and am asking a query about the code that I have selected.
+I would like to include a "broadcast" feature that allows the owner to send a message to all users of the bot. This should include an option to send the message to a specific user group as well.
 
