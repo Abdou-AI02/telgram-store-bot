@@ -508,7 +508,7 @@ class AddCouponState(StatesGroup):
     code = State()
     discount = State()
 
-class DeleteCouponState(StatesState):
+class DeleteCouponState(StatesGroup):
     code = State()
 
 class AddPointsState(StatesGroup):
@@ -762,6 +762,7 @@ async def handle_menu_buttons_with_state_reset(message: types.Message, state: FS
     elif text == "🔙 العودة للقائمة الرئيسية":
         await back_to_main_menu(message, state)
 
+# ====== Main Handlers ======
 @router.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
@@ -2273,6 +2274,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(router)
     
+    # Start the background task for automated notifications
     asyncio.create_task(auto_notifications(bot))
 
     logger.info("Starting bot...")
