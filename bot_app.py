@@ -2486,6 +2486,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"An error occurred: {e}")
 
-" and am asking a query about the code that I have selected.
-I would like to include a "broadcast" feature that allows the owner to send a message to all users of the bot. This should include an option to send the message to a specific user group as well.
-
