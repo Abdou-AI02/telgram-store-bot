@@ -75,7 +75,8 @@ async def init_db():
                 category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
                 description TEXT, 
                 file_url TEXT,
-                is_active BOOLEAN DEFAULT TRUE
+                is_active BOOLEAN DEFAULT TRUE,
+                low_stock_notified BOOLEAN DEFAULT FALSE
             );
             CREATE TABLE IF NOT EXISTS cart (
                 id SERIAL PRIMARY KEY, 
@@ -118,6 +119,9 @@ async def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(product_id)
             );
             """)
+            
+            # --- Migration logic for low_stock_notified ---
+            await conn.execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_notified BOOLEAN DEFAULT FALSE;")
             
             # --- Start of migration logic ---
             async with conn.transaction():
@@ -231,7 +235,8 @@ async def list_products(category_id: int = None):
         if category_id:
             return await conn.fetch("SELECT * FROM products WHERE category_id = $1 AND is_active = TRUE ORDER BY product_id", category_id)
         else:
-            return await conn.fetch("SELECT * FROM products WHERE is_active = TRUE ORDER BY product_id")
+            # Only fetch products with NO category for the main shop page
+            return await conn.fetch("SELECT * FROM products WHERE category_id IS NULL AND is_active = TRUE ORDER BY product_id")
 
 async def get_product_by_id(product_id: int):
     async with pool.acquire() as conn:
@@ -369,6 +374,9 @@ async def edit_product_db(product_id: int, name: str, price: float, stock: int, 
     async with pool.acquire() as conn:
         await conn.execute("UPDATE products SET name=$1, price=$2, stock=$3, category_id=$4, description=$5 WHERE product_id=$6", 
                           name, price, stock, category_id, description, product_id)
+        # Reset low stock notification flag if stock is replenished
+        if stock > 10: # Assuming 10 is the low stock threshold
+            await conn.execute("UPDATE products SET low_stock_notified = FALSE WHERE product_id = $1", product_id)
 
 
 async def delete_product_db(product_id: int):
@@ -2397,6 +2405,7 @@ async def process_notification_message(message: types.Message, state: FSMContext
             await message.bot.send_message(user['user_id'], f"📢 **إشعار من المسؤول:**\n\n{message_text}", parse_mode="HTML")
         except Exception as e:
             logger.error(f"Failed to send message to user {user['user_id']}: {e}")
+        await asyncio.sleep(0.1) # Small delay to avoid rate limiting
             
     await message.answer("✅ تم إرسال الإشعار بنجاح.", reply_markup=admin_panel_kb)
     await state.clear()
@@ -2448,15 +2457,18 @@ async def auto_notifications(bot: Bot):
         
         # Low stock notification
         async with pool.acquire() as conn:
-            products_stock = await conn.fetch("SELECT * FROM products WHERE is_active = TRUE AND stock <= 10 AND stock > 0")
-        
-        for p in products_stock:
-            for admin_id in ADMINS:
-                try:
-                    await bot.send_message(admin_id, f"⚠️ **تنبيه انخفاض المخزون:**\n\nالمنتج <b>{p['name']}</b> يتبقى منه {p['stock']} قطعة فقط!", parse_mode="HTML")
-                except Exception as e:
-                    logger.error(f"Failed to send low stock alert to admin {admin_id}: {e}")
-        
+            low_stock_products = await conn.fetch("SELECT * FROM products WHERE is_active = TRUE AND stock <= 10 AND stock > 0 AND low_stock_notified = FALSE")
+            
+            for p in low_stock_products:
+                for admin_id in ADMINS:
+                    try:
+                        await bot.send_message(admin_id, f"⚠️ **تنبيه انخفاض المخزون:**\n\nالمنتج <b>{p['name']}</b> يتبقى منه {p['stock']} قطعة فقط!", parse_mode="HTML")
+                    except Exception as e:
+                        logger.error(f"Failed to send low stock alert to admin {admin_id}: {e}")
+                
+                # Mark as notified to prevent spam
+                await conn.execute("UPDATE products SET low_stock_notified = TRUE WHERE product_id = $1", p['product_id'])
+
 async def main():
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN not found in .env file.")
